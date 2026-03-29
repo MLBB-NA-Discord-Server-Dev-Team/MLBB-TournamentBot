@@ -86,16 +86,30 @@ def sp_post(endpoint: str, data: dict) -> dict:
     return r.json()
 
 
-def get_or_create_term(endpoint: str, name: str, slug: str) -> int:
+def fmt_date(d: date) -> str:
+    return d.strftime("%B %d, %Y")
+
+
+def get_or_create_term(endpoint: str, name: str, slug: str, description: str = "") -> int:
     """Return existing term ID or create and return new one."""
     existing = sp_get(endpoint)
     for t in existing:
         if t["slug"] == slug or t["name"].lower() == name.lower():
             print(f"  EXISTS [{endpoint}]: {name} (id={t['id']})")
             return t["id"]
-    created = sp_post(endpoint, {"name": name, "slug": slug})
+    payload = {"name": name, "slug": slug}
+    if description:
+        payload["description"] = description
+    created = sp_post(endpoint, payload)
     print(f"  CREATED [{endpoint}]: {name} (id={created['id']})")
     return created["id"]
+
+
+def update_term_description(endpoint: str, term_id: int, description: str):
+    requests.post(
+        f"{WP_URL}/wp-json/sportspress/v2/{endpoint}/{term_id}",
+        auth=AUTH, headers=HEADERS, json={"description": description}
+    )
 
 
 def get_or_create_table(title: str, league_id: int, season_id: int) -> int:
@@ -188,7 +202,11 @@ def main():
 
     for season in seasons:
         print(f"\n=== Season: {season['name']} ===")
-        sp_season_id = get_or_create_term("seasons", season["name"], season["slug"])
+        desc = (
+            f"Play Start: {fmt_date(season['play_start'])}  |  "
+            f"Registration: {fmt_date(season['reg_opens'])} – {fmt_date(season['reg_closes'])}"
+        )
+        sp_season_id = get_or_create_term("seasons", season["name"], season["slug"], description=desc)
         upsert_season_schedule(cur, sp_season_id, season)
 
         for league_name in LORE_LEAGUES:
