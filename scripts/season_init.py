@@ -39,11 +39,15 @@ SEASON_INTERVAL = 90                   # days
 REG_LEAD_DAYS   = 30                   # registration opens 30 days before play start
 SEASONS_AHEAD   = 5                    # how many seasons to initialize
 
-LORE_LEAGUES = [
-    "Moniyan League",
-    "Abyss League",
-    "Northern Vale League",
-    "Cadia Riverlands League",
+# All sp_league taxonomy term IDs — one per league format × lore faction.
+# Sourced from league_pages.py output. Add new IDs here when new formats are created.
+ALL_LEAGUE_IDS = [
+    25, 26, 27, 28,     # Draft Pick BO3: Moniyan, Abyss, Northern Vale, Cadia Riverlands
+    34, 35, 36,         # Draft Pick BO5: Moniyan, Abyss, Northern Vale
+    37, 38, 39,         # Draft Pick BO1: Moniyan, Abyss, Northern Vale
+    40, 41, 42,         # Brawl BO1: Moniyan, Abyss, Northern Vale
+    43, 44, 45,         # Brawl BO3: Moniyan, Abyss, Northern Vale
+    46, 47, 48,         # Brawl BO5: Moniyan, Abyss, Northern Vale
 ]
 
 def season_name(start: date) -> str:
@@ -191,11 +195,12 @@ def main():
         print(f"  {s['name']:20s}  play={s['play_start']}  "
               f"reg={s['reg_opens']} → {s['reg_closes']}")
 
-    print("\n=== Ensuring lore league taxonomy terms ===")
-    league_ids = {}
-    for name in LORE_LEAGUES:
-        slug = name.lower().replace(" ", "-")
-        league_ids[name] = get_or_create_term("leagues", name, slug)
+    # Fetch all sp_league terms to build id→name map
+    print("\n=== Fetching league terms ===")
+    all_terms = sp_get("leagues")
+    league_map = {t["id"]: t["name"] for t in all_terms}
+    active_ids = [lid for lid in ALL_LEAGUE_IDS if lid in league_map]
+    print(f"  {len(active_ids)} active league formats found")
 
     conn = mysql.connector.connect(**DB)
     cur  = conn.cursor()
@@ -209,9 +214,10 @@ def main():
         sp_season_id = get_or_create_term("seasons", season["name"], season["slug"], description=desc)
         upsert_season_schedule(cur, sp_season_id, season)
 
-        for league_name in LORE_LEAGUES:
+        for league_id in active_ids:
+            league_name = league_map[league_id]
             table_title = f"{league_name} — {season['name']}"
-            table_id = get_or_create_table(table_title, league_ids[league_name], sp_season_id)
+            table_id = get_or_create_table(table_title, league_id, sp_season_id)
             upsert_registration_period(cur, table_id, sp_season_id, season)
 
     conn.commit()
