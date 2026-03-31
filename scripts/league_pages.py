@@ -263,11 +263,17 @@ FORMAT_HUBS = [
     },
 ]
 
-# ── QuickLinks menu config ────────────────────────────────────────────────────
+# ── Menu config ───────────────────────────────────────────────────────────────
 
-QUICKLINKS_MENU_ID = 18   # WP nav menu term_id
+QUICKLINKS_MENU_ID      = 18   # top-level nav
+DRAFT_PICK_MENU_ID      = 50   # Draft Pick League List
+BRAWL_MENU_ID           = 51   # Brawl League List
+SPECIAL_LEAGUES_MENU_ID = 52   # Special Leagues
 
-# Menu item db_ids to remove (old format-specific individual league pages)
+# QuickLinks: format hub pages only (no individual league submenus)
+# League pages live in the 3 dedicated menus above.
+
+# Menu item db_ids to remove from QuickLinks on cleanup (stale/old items)
 STALE_MENU_ITEM_IDS = [
     479, 490, 511, 515, 518, 520,   # old DP BO3 + Test Cadia
     523, 525, 527,                   # old DP BO5
@@ -278,6 +284,8 @@ STALE_MENU_ITEM_IDS = [
     649, 651, 653, 655,              # new clean DP BO5 individual pages
     658, 661, 664, 667,              # new clean DP BO3 individual pages
     670, 673, 676, 679,              # new clean Brawl individual pages
+    845, 846, 847, 848, 849, 850,    # QuickLinks submenus (moved to dedicated menus)
+    851, 852, 853, 854, 855, 856, 857,
 ]
 
 # WP page IDs to trash (old format-specific pages, no longer needed)
@@ -698,6 +706,137 @@ def add_nav_items(hub_page_ids: dict[str, int], league_page_ids: dict[str, list[
                     print(f"    ADDED submenu: {sub_title} (page={sub_page_id}, item={sub_item_id})")
 
 
+# ── Dedicated league menu population ─────────────────────────────────────────
+
+def _menu_existing_object_ids(menu_id: int) -> set:
+    r = requests.get(f"{WP_URL}/wp-json/wp/v2/menu-items",
+                     auth=AUTH, headers=HEADERS,
+                     params={"menus": menu_id, "per_page": 100})
+    return {item["object_id"] for item in r.json()} if r.ok else set()
+
+
+def _add_to_menu(menu_id: int, page_id: int, title: str, existing: set):
+    if page_id in existing:
+        print(f"    EXISTS: {title}")
+        return
+    php = (
+        f"$r=wp_update_nav_menu_item({menu_id},0,["
+        f"'menu-item-title'=>{json.dumps(title)},"
+        f"'menu-item-object'=>'page',"
+        f"'menu-item-object-id'=>{page_id},"
+        f"'menu-item-type'=>'post_type',"
+        f"'menu-item-status'=>'publish']);"
+        f"echo is_wp_error($r)?'ERR:'.$r->get_error_message():$r;"
+    )
+    try:
+        result = wpcli("eval", php)
+        print(f"    {'ERR: ' + result if result.startswith('ERR') else 'ADDED: ' + title + ' (item=' + result + ')'}")
+    except RuntimeError as e:
+        print(f"    WARN: {e}")
+
+
+def populate_league_menus():
+    """Populate Draft Pick, Brawl, and Special Leagues menus. Idempotent."""
+    print("\n=== Populating League Menus ===")
+
+    dp_existing      = _menu_existing_object_ids(DRAFT_PICK_MENU_ID)
+    brawl_existing   = _menu_existing_object_ids(BRAWL_MENU_ID)
+    special_existing = _menu_existing_object_ids(SPECIAL_LEAGUES_MENU_ID)
+
+    def page_id(slug: str) -> int:
+        r = requests.get(f"{WP_URL}/wp-json/wp/v2/pages",
+                         auth=AUTH, headers=HEADERS,
+                         params={"slug": slug, "per_page": 1})
+        pages = r.json() if r.ok else []
+        return pages[0]["id"] if pages else 0
+
+    # Draft Pick League List — hub pages + individual leagues
+    print("  [Draft Pick League List]")
+    _add_to_menu(DRAFT_PICK_MENU_ID, page_id("draft-pick-bo5"), "Draft Pick — Best of 5", dp_existing)
+    for lore_key in ["Moniyan", "Abyss", "Northern Vale", "Cadia Riverlands"]:
+        slug = lore_key.lower().replace(" ", "-") + "-league"
+        _add_to_menu(DRAFT_PICK_MENU_ID, page_id(slug), f"{LORE[lore_key]['display']} League", dp_existing)
+
+    _add_to_menu(DRAFT_PICK_MENU_ID, page_id("draft-pick-bo3"), "Draft Pick — Best of 3", dp_existing)
+    for lore_key in ["Agelta", "Los Pecados", "Aberleen", "Dragon Altar"]:
+        slug = lore_key.lower().replace(" ", "-") + "-league"
+        _add_to_menu(DRAFT_PICK_MENU_ID, page_id(slug), f"{LORE[lore_key]['display']} League", dp_existing)
+
+    # Brawl League List
+    print("  [Brawl League List]")
+    _add_to_menu(BRAWL_MENU_ID, page_id("brawl"), "Brawl", brawl_existing)
+    for lore_key in ["Megalith", "Vonetis", "Oasis", "Swan Castle"]:
+        slug = lore_key.lower().replace(" ", "-") + "-league"
+        _add_to_menu(BRAWL_MENU_ID, page_id(slug), f"{LORE[lore_key]['display']} League", brawl_existing)
+
+    # Special Leagues
+    print("  [Special Leagues]")
+    _add_to_menu(SPECIAL_LEAGUES_MENU_ID, page_id("free-play"),      "Free Play",      special_existing)
+    _add_to_menu(SPECIAL_LEAGUES_MENU_ID, page_id("eruditio-league"), "Eruditio League",special_existing)
+
+
+def rebuild_league_directory():
+    """Regenerate League Directory page content from current menu items."""
+    print("\n=== Rebuilding League Directory Page ===")
+
+    def menu_links_html(menu_id: int) -> str:
+        r = requests.get(f"{WP_URL}/wp-json/wp/v2/menu-items",
+                         auth=AUTH, headers=HEADERS,
+                         params={"menus": menu_id, "per_page": 100})
+        items = r.json() if r.ok else []
+        if not items:
+            return "<p>No leagues listed.</p>"
+        lis = "".join(
+            f'<li><a href="{item["url"]}">{item["title"]["rendered"]}</a></li>'
+            for item in items
+        )
+        return f"<ul>{lis}</ul>"
+
+    dp_html      = menu_links_html(DRAFT_PICK_MENU_ID)
+    brawl_html   = menu_links_html(BRAWL_MENU_ID)
+    special_html = menu_links_html(SPECIAL_LEAGUES_MENU_ID)
+
+    content = (
+        '<!-- wp:columns {"className":"league-directory-columns"} -->'
+        '<div class="wp-block-columns league-directory-columns">'
+
+        '<!-- wp:column --><div class="wp-block-column">'
+        '<!-- wp:heading {"level":3} --><h3 class="wp-block-heading">Draft Pick Leagues</h3><!-- /wp:heading -->'
+        f'<!-- wp:html -->{dp_html}<!-- /wp:html -->'
+        '</div><!-- /wp:column -->'
+
+        '<!-- wp:column --><div class="wp-block-column">'
+        '<!-- wp:heading {"level":3} --><h3 class="wp-block-heading">Brawl Leagues</h3><!-- /wp:heading -->'
+        f'<!-- wp:html -->{brawl_html}<!-- /wp:html -->'
+        '</div><!-- /wp:column -->'
+
+        '<!-- wp:column --><div class="wp-block-column">'
+        '<!-- wp:heading {"level":3} --><h3 class="wp-block-heading">Special Leagues</h3><!-- /wp:heading -->'
+        f'<!-- wp:html -->{special_html}<!-- /wp:html -->'
+        '</div><!-- /wp:column -->'
+
+        '</div><!-- /wp:columns -->'
+    )
+
+    with open(_CONTENT_TMP, "w") as f:
+        f.write(content)
+
+    r = requests.get(f"{WP_URL}/wp-json/wp/v2/pages",
+                     auth=AUTH, headers=HEADERS,
+                     params={"slug": "league-directory", "per_page": 1})
+    existing = r.json() if r.ok else []
+    if existing:
+        page_id = existing[0]["id"]
+        php = (
+            f"$c=file_get_contents('{_CONTENT_TMP}');"
+            f"wp_update_post(['ID'=>{page_id},'post_content'=>$c,'post_status'=>'publish']);"
+        )
+        wpcli("eval", php)
+        print(f"  UPDATED League Directory (id={page_id})")
+    else:
+        print("  WARN: league-directory page not found")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -777,35 +916,14 @@ def main():
 
     # ── Nav cleanup + rebuild ─────────────────────────────────────────────────
     cleanup_nav_and_pages()
+    # QuickLinks: format hub pages only (flat, no submenus)
+    add_nav_items(hub_page_ids, {})
 
-    # Build submenu data: format hub nav_title → [(league display title, page_id)]
-    fmt_by_key = {f["key"]: f for f in FORMATS}
-    league_submenus: dict[str, list[tuple[str, int]]] = {}
-    for hub in FORMAT_HUBS:
-        fmt_data = fmt_by_key.get(hub["format_key"])
-        subs = []
-        if fmt_data:
-            for lg in fmt_data["leagues"]:
-                lore_key = lg["name"]
-                slug = lore_key.lower().replace(" ", "-") + "-league"
-                # Look up the WP page ID by slug
-                r = requests.get(f"{WP_URL}/wp-json/wp/v2/pages",
-                                 auth=AUTH, headers=HEADERS,
-                                 params={"slug": slug, "per_page": 1})
-                pages = r.json() if r.ok else []
-                if pages:
-                    subs.append((f"{LORE[lore_key]['display']} League", pages[0]["id"]))
-        else:
-            # Eruditio (free play)
-            r = requests.get(f"{WP_URL}/wp-json/wp/v2/pages",
-                             auth=AUTH, headers=HEADERS,
-                             params={"slug": "eruditio-league", "per_page": 1})
-            pages = r.json() if r.ok else []
-            if pages:
-                subs.append(("Eruditio League", pages[0]["id"]))
-        league_submenus[hub["nav_title"]] = subs
+    # ── Populate dedicated league menus ───────────────────────────────────────
+    populate_league_menus()
 
-    add_nav_items(hub_page_ids, league_submenus)
+    # ── Rebuild League Directory page ─────────────────────────────────────────
+    rebuild_league_directory()
 
     print(f"\n✓ Done. {len(all_league_ids)} league terms.")
     print(f"sp_league IDs for season_init: {all_league_ids}")
