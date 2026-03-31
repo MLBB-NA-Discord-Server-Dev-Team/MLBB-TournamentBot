@@ -39,15 +39,12 @@ SEASON_INTERVAL = 90                   # days
 REG_LEAD_DAYS   = 30                   # registration opens 30 days before play start
 SEASONS_AHEAD   = 5                    # how many seasons to initialize
 
-# All sp_league taxonomy term IDs — one per league format × lore faction.
+# All active sp_league taxonomy term IDs.
 # Sourced from league_pages.py output. Add new IDs here when new formats are created.
 ALL_LEAGUE_IDS = [
-    25, 26, 27, 28,     # Draft Pick BO3: Moniyan, Abyss, Northern Vale, Cadia Riverlands
-    34, 35, 36,         # Draft Pick BO5: Moniyan, Abyss, Northern Vale
-    37, 38, 39,         # Draft Pick BO1: Moniyan, Abyss, Northern Vale
-    40, 41, 42,         # Brawl BO1: Moniyan, Abyss, Northern Vale
-    43, 44, 45,         # Brawl BO3: Moniyan, Abyss, Northern Vale
-    46, 47, 48,         # Brawl BO5: Moniyan, Abyss, Northern Vale
+    34, 35, 36, 37,     # Draft Pick BO5: Moniyan, Abyss, Northern Vale, Cadia Riverlands
+    25, 26, 27, 28,     # Draft Pick BO3: Agelta, Los Pecados, Aberleen, Dragon Altar
+    40, 41, 42, 43,     # Brawl: Megalith, Vonetis, Oasis, Swan Castle
 ]
 
 def season_name(start: date) -> str:
