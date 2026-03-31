@@ -45,6 +45,7 @@ ALL_LEAGUE_IDS = [
     34, 35, 36, 37,     # Draft Pick BO5: Moniyan, Abyss, Northern Vale, Cadia Riverlands
     25, 26, 27, 28,     # Draft Pick BO3: Agelta, Los Pecados, Aberleen, Dragon Altar
     40, 41, 42, 43,     # Brawl: Megalith, Vonetis, Oasis, Swan Castle
+    49,                 # Free Play: Eruditio (random team assignment)
 ]
 
 def season_name(start: date) -> str:

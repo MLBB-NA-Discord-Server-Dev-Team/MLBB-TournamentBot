@@ -1,14 +1,15 @@
 """
 scripts/league_pages.py
-Creates/updates WP pages and sp_league taxonomy terms for all league formats.
+Creates/updates WP pages, sp_league terms, format hub pages, league index,
+and QuickLinks nav menu for all league formats.
 
-League structure (12 leagues across 3 formats):
+League structure (13 leagues):
   - Draft Pick BO5 (5-Game):  Moniyan, Abyss, Northern Vale, Cadia Riverlands
   - Draft Pick BO3 (3-Game):  Agelta, Los Pecados, Aberleen, Dragon Altar
   - Brawl (format per season): Megalith, Vonetis, Oasis, Swan Castle
+  - Free Play:                 Eruditio (random team assignment)
 
-Run this script to bootstrap all league pages, then re-run season_init.py
-to generate sp_table posts for the new league terms.
+Run this script to bootstrap everything, then re-run season_init.py.
 Idempotent — safe to re-run.
 """
 import sys, os
@@ -80,7 +81,7 @@ LORE = {
         "display":    "Agelta Drylands",
         "image_url":  "https://static.wikia.nocookie.net/mobile-legends/images/4/44/Agelta_Drylands.jpg/revision/latest?cb=20220304094414",
         "image_name": "agelta-drylands.jpg",
-        "media_id":   0,
+        "media_id":   779,
         "lore_desc":  (
             "Agelta Drylands is a vast desert in the west of the Land of Dawn, meaning "
             "'yellow sand everywhere.' The harsh terrain is home to Los Pecados and The Oasis."
@@ -90,7 +91,7 @@ LORE = {
         "display":    "Los Pecados",
         "image_url":  "https://static.wikia.nocookie.net/mobile-legends/images/2/23/Los_Pecados_-_City_of_Sins_Full.png/revision/latest?cb=20210124052915",
         "image_name": "los-pecados.png",
-        "media_id":   0,
+        "media_id":   781,
         "lore_desc":  (
             "Los Pecados is a lawless city of sins in the Agelta Drylands, established after the "
             "Moniyan Empire's collapse by homeless soldiers. A black market thrives in its shadows."
@@ -100,7 +101,7 @@ LORE = {
         "display":    "Castle Aberleen",
         "image_url":  "https://static.wikia.nocookie.net/mobile-legends/images/3/3f/Castle_Aberleen.jpg/revision/latest?cb=20200411134009",
         "image_name": "castle-aberleen.jpg",
-        "media_id":   0,
+        "media_id":   783,
         "lore_desc":  (
             "Castle Aberleen is a mist-shrouded fortress in Avalor, ruled by House Paxley "
             "in the southern reaches of the Moniyan Empire."
@@ -110,7 +111,7 @@ LORE = {
         "display":    "Dragon Altar",
         "image_url":  "https://static.wikia.nocookie.net/mobile-legends/images/d/d3/Dragon_Altar_-_Full.png/revision/latest?cb=20211230063031",
         "image_name": "dragon-altar.png",
-        "media_id":   0,
+        "media_id":   785,
         "lore_desc":  (
             "The Dragon Altar is a sacred site in the Cadia Riverlands, hidden among "
             "sky-soaring mountains where the Great Dragon and his disciples reside."
@@ -121,7 +122,7 @@ LORE = {
         "display":    "Megalith Wasteland",
         "image_url":  "https://static.wikia.nocookie.net/mobile-legends/images/2/26/Megalith_Wasteland.jpg/revision/latest?cb=20200313120257",
         "image_name": "megalith-wasteland.jpg",
-        "media_id":   0,
+        "media_id":   787,
         "lore_desc":  (
             "The Megalith Wasteland is a rugged terrain on the border of Northern Vale and the "
             "Moniyan Empire, known for its towering rock formations and harsh conditions."
@@ -131,7 +132,7 @@ LORE = {
         "display":    "Vonetis Sea",
         "image_url":  "https://static.wikia.nocookie.net/mobile-legends/images/0/0e/Blue_Flame.jpg/revision/latest?cb=20200414080908",
         "image_name": "vonetis-sea.jpg",
-        "media_id":   0,
+        "media_id":   789,
         "lore_desc":  (
             "The Vonetis Sea is an archipelago home to the Dorik people, with islands "
             "including Perlas, Blue Flame Island, and Solari Isle."
@@ -141,7 +142,7 @@ LORE = {
         "display":    "The Oasis",
         "image_url":  "https://static.wikia.nocookie.net/mobile-legends/images/e/e8/Agelta_Drylands_-_The_Oasis_Full.png/revision/latest?cb=20210123094237",
         "image_name": "the-oasis.png",
-        "media_id":   0,
+        "media_id":   791,
         "lore_desc":  (
             "The Oasis is a sanctuary created by Belerick in the Agelta Drylands, "
             "offering respite to trade caravans crossing the desert. Home to Floryn."
@@ -151,10 +152,22 @@ LORE = {
         "display":    "Swan Castle",
         "image_url":  "https://static.wikia.nocookie.net/mobile-legends/images/b/be/Azure_Lake.png/revision/latest?cb=20180913182035",
         "image_name": "azure-lake-swan-castle.png",
-        "media_id":   0,
+        "media_id":   793,
         "lore_desc":  (
             "Swan Castle is a romantic retreat near Azure Lake in the Moniyan Empire, "
             "founded by Prince Alvin I as a sanctuary apart from the throne."
+        ),
+    },
+    # ── Free Play ─────────────────────────────────────────────────────────────
+    "Eruditio": {
+        "display":    "Eruditio",
+        "image_url":  "https://static.wikia.nocookie.net/mobile-legends/images/b/b7/Panorama_of_Eruditio.jpg/revision/latest?cb=20231020121522",
+        "image_name": "eruditio-panorama.jpg",
+        "media_id":   795,
+        "lore_desc":  (
+            "Eruditio is the city of knowledge and technology in the Land of Dawn, a beacon of "
+            "innovation and learning. The Eruditio League is a free-play league where players are "
+            "randomly assigned to teams each season."
         ),
     },
 }
@@ -208,6 +221,78 @@ FORMATS = [
 # These remain in the DB but are removed from ALL_LEAGUE_IDS in season_init.
 RETIRED_IDS = [38, 39, 44, 45, 46, 47, 48]
 
+# ── Eruditio (Free Play) ──────────────────────────────────────────────────────
+
+ERUDITIO = {
+    "key":         "eruditio",
+    "label":       "Free Play — Eruditio",
+    "existing_id": None,   # set after first run; update if term already exists
+}
+
+# ── Format hub page definitions ───────────────────────────────────────────────
+# Each format gets a hub page listing its leagues, linked from QuickLinks nav.
+
+FORMAT_HUBS = [
+    {
+        "slug":       "draft-pick-bo5",
+        "title":      "Draft Pick — Best of 5",
+        "nav_title":  "Draft Pick BO5",
+        "format_key": "dp5",
+        "desc":       "5-game Draft Pick series. Teams ban and pick heroes through a snake draft.",
+    },
+    {
+        "slug":       "draft-pick-bo3",
+        "title":      "Draft Pick — Best of 3",
+        "nav_title":  "Draft Pick BO3",
+        "format_key": "dp3",
+        "desc":       "3-game Draft Pick series. Teams ban and pick heroes through a snake draft.",
+    },
+    {
+        "slug":       "brawl",
+        "title":      "Brawl",
+        "nav_title":  "Brawl",
+        "format_key": "brawl",
+        "desc":       "5v5 Brawl — heroes are randomly assigned. Format (BO1/BO3/BO5) set per season.",
+    },
+    {
+        "slug":       "free-play",
+        "title":      "Free Play",
+        "nav_title":  "Free Play",
+        "format_key": "eruditio",
+        "desc":       "Open free-play league. Players register individually and are randomly assigned to teams each season.",
+    },
+]
+
+# ── QuickLinks menu config ────────────────────────────────────────────────────
+
+QUICKLINKS_MENU_ID = 18   # WP nav menu term_id
+
+# Menu item db_ids to remove (old format-specific individual league pages)
+STALE_MENU_ITEM_IDS = [
+    479, 490, 511, 515, 518, 520,   # old DP BO3 + Test Cadia
+    523, 525, 527,                   # old DP BO5
+    529, 531, 533,                   # old DP BO1
+    535, 537, 539,                   # old Brawl BO1
+    541, 543, 545,                   # old Brawl BO3
+    547, 549,                        # old Brawl BO5
+    649, 651, 653, 655,              # new clean DP BO5 individual pages
+    658, 661, 664, 667,              # new clean DP BO3 individual pages
+    670, 673, 676, 679,              # new clean Brawl individual pages
+]
+
+# WP page IDs to trash (old format-specific pages, no longer needed)
+STALE_PAGE_IDS = [
+    478, 510, 514, 517,              # old DP BO3 pages
+    522, 524, 526,                   # old DP BO5 pages
+    528, 530, 532,                   # old DP BO1 pages
+    534, 536, 538,                   # old Brawl BO1 pages
+    540, 542, 544,                   # old Brawl BO3 pages
+    546, 548, 489,                   # old Brawl BO5 pages
+]
+
+# Nav items to keep: League Directory (300), Sign-Ups (308), General Rules (552)
+NAV_KEEP_IDS = {300, 308, 552}
+
 
 # ── Image upload ──────────────────────────────────────────────────────────────
 
@@ -241,14 +326,12 @@ def ensure_media_id(lore_key: str) -> int:
 # ── Page content builders ─────────────────────────────────────────────────────
 
 def cover_block(image_url: str, media_id: int, title: str) -> str:
-    """Gutenberg cover block using the region's featured image."""
+    """Gutenberg cover block using the page's featured image (useFeaturedImage: true).
+    The image_url/media_id are kept as fallback attrs; WP will render the featured image."""
     return (
-        f'<!-- wp:cover {{"url":{json.dumps(image_url)},"id":{media_id},"dimRatio":40,'
-        f'"minHeight":320,"minHeightUnit":"px"}} -->'
+        f'<!-- wp:cover {{"useFeaturedImage":true,"dimRatio":40,"minHeight":320,"minHeightUnit":"px"}} -->'
         f'<div class="wp-block-cover" style="min-height:320px">'
         f'<span aria-hidden="true" class="wp-block-cover__background has-background-dim-40 has-background-dim"></span>'
-        f'<img class="wp-block-cover__image-background wp-image-{media_id}" alt="" '
-        f'src="{image_url}" data-object-fit="cover"/>'
         f'<div class="wp-block-cover__inner-container">'
         f'<!-- wp:heading {{"textAlign":"center","level":1,"style":{{"color":{{"text":"#ffffff"}}}}}} -->'
         f'<h1 class="wp-block-heading has-text-align-center has-text-color" style="color:#ffffff">{title}</h1>'
@@ -406,16 +489,226 @@ def get_or_update_page(slug: str, title: str, content: str, media_id: int) -> in
     return page_id
 
 
+# ── Format hub page builders ──────────────────────────────────────────────────
+
+def league_link_list(leagues: list[dict]) -> str:
+    """Gutenberg list of league page links."""
+    items = ""
+    for lg in leagues:
+        lore_key = lg["name"]
+        display  = LORE[lore_key]["display"]
+        slug     = lore_key.lower().replace(" ", "-") + "-league"
+        items += f'<li><a href="/{slug}/">{display} League</a></li>'
+    return (
+        f"<!-- wp:list --><ul class=\"wp-block-list\">{items}</ul><!-- /wp:list -->"
+    )
+
+
+def eruditio_link_item() -> str:
+    return (
+        '<!-- wp:list --><ul class="wp-block-list">'
+        '<li><a href="/eruditio-league/">Eruditio League — Free Play</a></li>'
+        '</ul><!-- /wp:list -->'
+    )
+
+
+def build_hub_content(hub: dict, fmt_data: dict | None) -> str:
+    """Content for a format hub page (cover + description + league list)."""
+    # Pick a representative cover image from the first league in this format
+    if fmt_data:
+        first_key = fmt_data["leagues"][0]["name"]
+        img_url  = LORE[first_key]["image_url"]
+        media_id = LORE[first_key]["media_id"] or 0
+    else:
+        # Eruditio hub
+        img_url  = LORE["Eruditio"]["image_url"]
+        media_id = LORE["Eruditio"]["media_id"] or 0
+
+    content = cover_block(img_url, media_id, hub["title"])
+    content += (
+        "<!-- wp:paragraph -->"
+        f"<p>{hub['desc']}</p>"
+        "<!-- /wp:paragraph -->"
+        "<!-- wp:separator --><hr class=\"wp-block-separator has-alpha-channel-opacity\"/><!-- /wp:separator -->"
+        "<!-- wp:heading --><h2 class=\"wp-block-heading\">Leagues</h2><!-- /wp:heading -->"
+    )
+    if fmt_data:
+        content += league_link_list(fmt_data["leagues"])
+    else:
+        content += eruditio_link_item()
+
+    content += (
+        "<!-- wp:paragraph -->"
+        '<p>See the <a href="/general-rules/">General Rules</a> for scheduling policies and conduct rules.</p>'
+        "<!-- /wp:paragraph -->"
+    )
+    return content
+
+
+def build_eruditio_page_content(media_id: int) -> str:
+    """Content for the Eruditio League individual page."""
+    image_url = LORE["Eruditio"]["image_url"]
+    content = cover_block(image_url, media_id, "Eruditio League")
+    content += (
+        "<!-- wp:separator --><hr class=\"wp-block-separator has-alpha-channel-opacity\"/><!-- /wp:separator -->"
+        "<!-- wp:heading --><h2 class=\"wp-block-heading\">League Rules</h2><!-- /wp:heading -->"
+        '<!-- wp:html --><table class="league-rules"><tbody>'
+        "<tr><th>Format</th><td>Set per season</td></tr>"
+        "<tr><th>Mode</th><td>5v5 Custom Room</td></tr>"
+        "<tr><th>Team assignment</th><td>Random — assigned at season start</td></tr>"
+        "<tr><th>Scheduling</th><td>Ad-Hoc | Fixed</td></tr>"
+        "</tbody></table><!-- /wp:html -->"
+        "<!-- wp:paragraph -->"
+        '<p>See the <a href="/general-rules/">General Rules</a> page for sportsmanship guidelines, '
+        "disconnect policies, and scheduling definitions.</p>"
+        "<!-- /wp:paragraph -->"
+    )
+    return content
+
+
+def build_league_index_content(league_ids_by_format: dict) -> str:
+    """Content for the /leagues/ index page."""
+    format_sections = [
+        ("Draft Pick — Best of 5", "dp5",     "/draft-pick-bo5/"),
+        ("Draft Pick — Best of 3", "dp3",     "/draft-pick-bo3/"),
+        ("Brawl",                  "brawl",   "/brawl/"),
+        ("Free Play",              "eruditio","/free-play/"),
+    ]
+    content = ""
+    for section_title, fmt_key, hub_url in format_sections:
+        content += (
+            f"<!-- wp:heading --><h2 class=\"wp-block-heading\">"
+            f'<a href="{hub_url}">{section_title}</a>'
+            f"</h2><!-- /wp:heading -->"
+        )
+        if fmt_key == "eruditio":
+            content += eruditio_link_item()
+        else:
+            fmt_data = next((f for f in FORMATS if f["key"] == fmt_key), None)
+            if fmt_data:
+                content += league_link_list(fmt_data["leagues"])
+        content += "<!-- wp:separator --><hr class=\"wp-block-separator has-alpha-channel-opacity\"/><!-- /wp:separator -->"
+
+    return content
+
+
+# ── Nav helpers ───────────────────────────────────────────────────────────────
+
+def wpcli_no_skip(*args) -> str:
+    """WP-CLI without --skip-plugins (needed for menu operations that require nav menus to be registered)."""
+    cmd = ["wp", "--allow-root", f"--path={WP_PATH}"] + list(args)
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"WP-CLI error: {result.stderr.strip()}")
+    return result.stdout.strip()
+
+
+def cleanup_nav_and_pages():
+    """Remove stale menu items and trash old pages."""
+    print("\n=== Nav Cleanup ===")
+
+    # Remove stale menu items
+    removed = 0
+    for item_id in STALE_MENU_ITEM_IDS:
+        try:
+            wpcli_no_skip("menu", "item", "delete", str(item_id))
+            removed += 1
+        except RuntimeError:
+            pass   # already gone
+    print(f"  Removed {removed} stale QuickLinks items")
+
+    # Permanently delete old pages (idempotent — silently skips missing IDs)
+    trashed = 0
+    for page_id in STALE_PAGE_IDS:
+        try:
+            result = wpcli("eval",
+                f"if(get_post({page_id})){{wp_delete_post({page_id},true);echo 'deleted';}}")
+            if result == "deleted":
+                trashed += 1
+        except RuntimeError:
+            pass
+    print(f"  Deleted {trashed} old format-specific pages")
+
+    # Find and delete Test Cadia page by slug
+    try:
+        wpcli("eval",
+              "$p=get_page_by_path('test-cadia-4','OBJECT','page');"
+              "if($p) { wp_delete_post($p->ID, true); echo 'deleted test-cadia'; }")
+    except RuntimeError:
+        pass
+
+
+def _add_menu_item(page_id: int, title: str, parent_item_id: int = 0) -> int | None:
+    """Add a single nav item. Returns the new menu item ID or None on failure."""
+    php = (
+        f"$r=wp_update_nav_menu_item({QUICKLINKS_MENU_ID},0,["
+        f"'menu-item-title'=>{json.dumps(title)},"
+        f"'menu-item-object'=>'page',"
+        f"'menu-item-object-id'=>{page_id},"
+        f"'menu-item-parent-id'=>{parent_item_id},"
+        f"'menu-item-type'=>'post_type',"
+        f"'menu-item-status'=>'publish'"
+        f"]);echo is_wp_error($r)?'ERROR:'.$r->get_error_message():$r;"
+    )
+    try:
+        result = wpcli("eval", php)
+        if result.startswith("ERROR"):
+            print(f"    WARN: {result}")
+            return None
+        return int(result)
+    except RuntimeError as e:
+        print(f"    WARN: {e}")
+        return None
+
+
+def add_nav_items(hub_page_ids: dict[str, int], league_page_ids: dict[str, list[tuple[str, int]]]):
+    """Add format hub pages (top-level) + league pages (submenus) to QuickLinks.
+    hub_page_ids:    {nav_title: page_id}
+    league_page_ids: {nav_title: [(sub_title, sub_page_id), ...]}
+    Skips items already pointing to the same page.
+    """
+    print("\n=== Adding QuickLinks Nav Items ===")
+
+    # Fetch existing items to avoid duplicates
+    r = requests.get(f"{WP_URL}/wp-json/wp/v2/menu-items",
+                     auth=AUTH, headers=HEADERS,
+                     params={"menus": QUICKLINKS_MENU_ID, "per_page": 100})
+    existing = r.json() if r.ok else []
+    existing_by_object_id = {item["object_id"]: item["id"] for item in existing}
+
+    for title, page_id in hub_page_ids.items():
+        if page_id in existing_by_object_id:
+            parent_item_id = existing_by_object_id[page_id]
+            print(f"  EXISTS nav item: {title} (page={page_id}, item={parent_item_id})")
+        else:
+            parent_item_id = _add_menu_item(page_id, title)
+            if parent_item_id:
+                print(f"  ADDED nav item: {title} (page={page_id}, item={parent_item_id})")
+            else:
+                continue
+
+        # Add submenu items
+        subs = league_page_ids.get(title, [])
+        for sub_title, sub_page_id in subs:
+            if sub_page_id in existing_by_object_id:
+                print(f"    EXISTS submenu: {sub_title}")
+            else:
+                sub_item_id = _add_menu_item(sub_page_id, sub_title, parent_item_id)
+                if sub_item_id:
+                    print(f"    ADDED submenu: {sub_title} (page={sub_page_id}, item={sub_item_id})")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
     all_league_ids = []
+    hub_page_ids: dict[str, int] = {}   # nav_title → page_id
 
     # ── General Rules page ────────────────────────────────────────────────────
     print("\n=== General Rules Page ===")
     get_or_update_page(GENERAL_RULES_SLUG, GENERAL_RULES_TITLE, GENERAL_RULES_CONTENT, 0)
 
-    # ── League pages ──────────────────────────────────────────────────────────
+    # ── Individual league pages + terms ───────────────────────────────────────
     for fmt in FORMATS:
         print(f"\n{'='*60}")
         print(f"Format: {fmt['label']}")
@@ -423,19 +716,17 @@ def main():
 
         for league in fmt["leagues"]:
             lore_key = league["name"]
-            lore = LORE[lore_key]
+            lore     = LORE[lore_key]
             term_name = f"{lore_key} League"
             term_slug = lore_key.lower().replace(" ", "-") + "-league"
-            page_slug  = lore_key.lower().replace(" ", "-") + "-league"
+            page_slug = lore_key.lower().replace(" ", "-") + "-league"
             page_title = f"{lore['display']} League"
 
             print(f"\n  [{lore_key}]")
-
             media_id = ensure_media_id(lore_key)
 
             league_id = get_or_update_league_term(
-                name=term_name,
-                slug=term_slug,
+                name=term_name, slug=term_slug,
                 description=lore["lore_desc"],
                 existing_id=league.get("existing_id"),
             )
@@ -446,9 +737,80 @@ def main():
             )
             get_or_update_page(page_slug, page_title, content, media_id)
 
-    print(f"\n✓ Done. {len(all_league_ids)} league terms processed.")
-    print(f"\nsp_league IDs for season_init:\n{all_league_ids}")
-    print(f"\nRetired IDs (remove from season_init ALL_LEAGUE_IDS):\n{RETIRED_IDS}")
+    # ── Eruditio League (Free Play) ───────────────────────────────────────────
+    print(f"\n{'='*60}")
+    print("Format: Free Play — Eruditio")
+    print('='*60)
+    eruditio_media_id = ensure_media_id("Eruditio")
+    eruditio_league_id = get_or_update_league_term(
+        name="Eruditio League",
+        slug="eruditio-league",
+        description=LORE["Eruditio"]["lore_desc"],
+        existing_id=ERUDITIO.get("existing_id"),
+    )
+    all_league_ids.append(eruditio_league_id)
+    get_or_update_page(
+        "eruditio-league", "Eruditio League",
+        build_eruditio_page_content(eruditio_media_id),
+        eruditio_media_id,
+    )
+
+    # ── Format hub pages ──────────────────────────────────────────────────────
+    print("\n=== Format Hub Pages ===")
+    fmt_by_key = {f["key"]: f for f in FORMATS}
+    for hub in FORMAT_HUBS:
+        fmt_data = fmt_by_key.get(hub["format_key"])   # None for eruditio
+        # Use Eruditio media for free-play hub; ensure images are uploaded first
+        if hub["format_key"] == "eruditio":
+            ensure_media_id("Eruditio")
+        else:
+            ensure_media_id(fmt_data["leagues"][0]["name"])
+
+        content  = build_hub_content(hub, fmt_data)
+        page_id  = get_or_update_page(hub["slug"], hub["title"], content, 0)
+        hub_page_ids[hub["nav_title"]] = page_id
+
+    # ── League Index page ─────────────────────────────────────────────────────
+    print("\n=== League Index Page ===")
+    index_content = build_league_index_content({})
+    get_or_update_page("leagues", "Leagues", index_content, 0)
+
+    # ── Nav cleanup + rebuild ─────────────────────────────────────────────────
+    cleanup_nav_and_pages()
+
+    # Build submenu data: format hub nav_title → [(league display title, page_id)]
+    fmt_by_key = {f["key"]: f for f in FORMATS}
+    league_submenus: dict[str, list[tuple[str, int]]] = {}
+    for hub in FORMAT_HUBS:
+        fmt_data = fmt_by_key.get(hub["format_key"])
+        subs = []
+        if fmt_data:
+            for lg in fmt_data["leagues"]:
+                lore_key = lg["name"]
+                slug = lore_key.lower().replace(" ", "-") + "-league"
+                # Look up the WP page ID by slug
+                r = requests.get(f"{WP_URL}/wp-json/wp/v2/pages",
+                                 auth=AUTH, headers=HEADERS,
+                                 params={"slug": slug, "per_page": 1})
+                pages = r.json() if r.ok else []
+                if pages:
+                    subs.append((f"{LORE[lore_key]['display']} League", pages[0]["id"]))
+        else:
+            # Eruditio (free play)
+            r = requests.get(f"{WP_URL}/wp-json/wp/v2/pages",
+                             auth=AUTH, headers=HEADERS,
+                             params={"slug": "eruditio-league", "per_page": 1})
+            pages = r.json() if r.ok else []
+            if pages:
+                subs.append(("Eruditio League", pages[0]["id"]))
+        league_submenus[hub["nav_title"]] = subs
+
+    add_nav_items(hub_page_ids, league_submenus)
+
+    print(f"\n✓ Done. {len(all_league_ids)} league terms.")
+    print(f"sp_league IDs for season_init: {all_league_ids}")
+    eruditio_note = f"  Add Eruditio League id={eruditio_league_id} to season_init ALL_LEAGUE_IDS"
+    print(eruditio_note)
 
 
 if __name__ == "__main__":
