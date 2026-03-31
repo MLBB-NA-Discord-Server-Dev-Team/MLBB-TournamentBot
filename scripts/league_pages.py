@@ -238,14 +238,14 @@ FORMAT_HUBS = [
         "title":      "Draft Pick — Best of 5",
         "nav_title":  "Draft Pick BO5",
         "format_key": "dp5",
-        "desc":       "5-game Draft Pick series. Teams ban and pick heroes through a snake draft.",
+        "desc":       "5-game Draft Pick series. Teams play a round-robin format with hero draft pick.",
     },
     {
         "slug":       "draft-pick-bo3",
         "title":      "Draft Pick — Best of 3",
         "nav_title":  "Draft Pick BO3",
         "format_key": "dp3",
-        "desc":       "3-game Draft Pick series. Teams ban and pick heroes through a snake draft.",
+        "desc":       "3-game Draft Pick series. Teams play a round-robin format with hero draft pick.",
     },
     {
         "slug":       "brawl",
