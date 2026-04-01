@@ -316,7 +316,7 @@ Background task loop. Runs every 60 seconds.
 **Responsibilities:**
 1. **Registration transitions**: query `mlbb_registration_periods` where `status != 'closed'`
    and `opens_at <= NOW()` (→ set `open`) or `closes_at <= NOW()` (→ set `closed`).
-   On transition, post announcement embed to `#announcements` channel.
+   On transition, post announcement embed to `#match-notifications`.
 
 2. **Match window creation** (Thursdays at midnight): for each league's active season,
    generate the week's Thu–Sun play window entries in `mlbb_match_schedule`.
@@ -342,7 +342,7 @@ Background task loop. Runs every 60 seconds.
 9. **Pick-up deadline enforcement**: query `mlbb_pickup_matches` where
    `status = 'active'` and `deadline < NOW()`. For each:
    - If one team submitted: advance submitting team, mark other forfeited
-   - If neither submitted: mark `admin_review`, ping admins in `#pickup-tournaments`
+   - If neither submitted: mark `admin_review`, post to `#match-notifications` with admin ping
    - Delete expired voice channel, log to `mlbb_voice_channels`
 
 10. **Pick-up round advancement**: after each match result is confirmed, check if all
@@ -385,7 +385,7 @@ Manages the rolling pick-up tournament pool and bracket lifecycle.
    - Set deadline = NOW() + 48h
    - Insert `mlbb_pickup_matches` row
 7. Insert `mlbb_pickup_tournaments` row
-8. Post bracket announcement embed to `#pickup-tournaments` channel
+8. Post bracket announcement embed to `#match-notifications`
 
 **Round advancement (fires when all matches in current round are completed):**
 1. Collect winners from completed round
@@ -397,7 +397,7 @@ Manages the rolling pick-up tournament pool and bracket lifecycle.
 **Deadline enforcement (checked by scheduler):**
 - If `deadline < NOW()` and `status = 'active'` and no submission: mark `forfeited`
   - Team that submitted results (or submitted first if both did) advances
-  - If neither submitted: admin review flag, ping `#pickup-tournaments`
+  - If neither submitted: admin review flag, post to `#match-notifications` with admin ping
 
 ### 3.9 `services/eruditio.py`
 Random team assignment for the Free Play (Eruditio) league.
@@ -500,7 +500,7 @@ Full schedule: play.mlbb.site/moniyan-league/
 **`/match submit` flow:**
 1. Bot defers response (processing)
 2. Screenshot downloaded, sent to Claude claude-haiku-4-5 vision
-3. Bot posts parsing result embed to `#match-results` channel:
+3. Bot posts parsing result embed to `#match-notifications`:
    ```
    📸 Match Result Submitted
    ─────────────────────────
@@ -605,27 +605,40 @@ Thursday 19:00 PST (03:00 UTC Friday)
 Sunday 23:00 PST (07:00 UTC Monday)
     ├── delete all voice channels created this window
     ├── mark Discord events as completed
-    └── post reminders to #match-results for any uncompleted matchups
+    └── post reminders to #match-notifications for any uncompleted matchups
 ```
 
-### Notifications
+### Notifications Channel
 
-| Trigger | Channel | Message |
-|---------|---------|---------|
-| Registration opens | #announcements | "📋 Registration is now open for [League] — [Season]! Use `/league register` to sign up." |
-| Registration closes (24h) | #announcements | "⏰ Registration for [League] closes in 24 hours!" |
-| Registration closed | #announcements | "🔒 Registration for [League] is now closed. [N] teams registered." |
-| Season start | #announcements | "🏆 [Season] has begun! Round-robin schedule generated. First match window: Thu [date]." |
-| Match window opens | #match-reminders | "🎮 Match window open! [League] Round [N] — play your matches by Sunday 11 PM PST." |
-| Match window closes (24h) | #match-reminders | "⏰ Match window closes in 24 hours. Unplayed matches will be reviewed by admins." |
-| Match confirmed | #match-results | Confirmation embed with final score |
-| Dispute raised | #match-results + DMs | "⚠️ Result disputed — admins have been notified." |
-| Pick-up pool: 8 teams ready | #pickup-tournaments | "🏆 Bracket firing! Pick-up Cup #N is starting — 8 teams locked in." |
-| Pick-up bracket created | #pickup-tournaments | Bracket embed with QF pairings + 48h deadline |
-| Pick-up round advance | #pickup-tournaments | Updated bracket embed showing next round pairings + new deadline |
-| Pick-up deadline approaching (12h) | #pickup-tournaments + DMs to captains | "⏰ Your pick-up match deadline is in 12 hours. Submit results or contact your opponent." |
-| Pick-up deadline missed | #pickup-tournaments + admin ping | "⚠️ Match forfeited — [Team] did not submit by deadline." |
-| Pick-up cup complete | #pickup-tournaments | "🥇 Pick-up Cup #N complete! Winner: [Team]. Results at play.mlbb.site/pickup-cup-N/" |
+All automated event notifications post to a single `#match-notifications` text channel
+(configured via `MATCH_NOTIFICATIONS_CHANNEL_ID`) that lives in the same Discord category
+as the match voice channels (`MATCH_VOICE_CATEGORY_ID=1488715625172959272`).
+
+**Channel bootstrap** (runs at bot startup in `services/scheduler.py`):
+1. Fetch category by `MATCH_VOICE_CATEGORY_ID`
+2. Check if a text channel named `match-notifications` already exists in the category
+3. If not: create it with `@everyone` read-only (send = Deny, view = Allow)
+4. Write resolved channel ID to `MATCH_NOTIFICATIONS_CHANNEL_ID` in `.env` for subsequent restarts
+
+| Trigger | Embed |
+|---------|-------|
+| Registration opens | `📋 Registration Open — [League] [Season]` · "Sign up with `/league register` by [closes_at]." |
+| Registration closes (24h) | `⏰ Registration Closes Soon — [League]` · "24 hours remaining. [N] teams registered so far." |
+| Registration closed | `🔒 Registration Closed — [League]` · "[N] teams locked in for [Season]." |
+| Season start | `🏆 [Season] Has Begun!` · "Round-robin schedule generated for all leagues. First match window: Thu [date]–Sun [date]." |
+| Match window opens (Thu) | `🎮 Match Window Open — Round [N]` · Per-league matchup list with team names. "Play window: Thu [date] – Sun [date] 11 PM PST." |
+| Match window closes (24h) | `⏰ Match Window Closes in 24 Hours` · List of leagues with unsubmitted results still outstanding. |
+| Match result confirmed | `✅ Result — [League] Round [N]` · "[Home Team]  **X – Y**  [Away Team]" · "Reported by @captain · Confirmed by @opponent" |
+| Match disputed | `⚠️ Result Disputed — [League] Round [N]` · "[Team A] vs [Team B] · An admin has been notified." · DM sent to both captains + admin ping |
+| Pick-up pool: 8 teams ready | `🏆 Pick-up Cup #N — Bracket Firing!` · "8 teams locked in. Quarter-finals begin now — 48h to complete each round." |
+| Pick-up matchup created (per round) | `🏆 Pick-up Cup #N — [Round Name]` · Bracket-style matchup list with deadlines and linked voice channels |
+| Pick-up round advance | `🏆 Pick-up Cup #N — [Next Round] Set` · Updated bracket showing advancing teams + new 48h deadline |
+| Pick-up deadline approaching (12h) | `⏰ Pick-up Deadline in 12 Hours — Cup #N` · Lists matches still pending. DM sent to both captains of each unfinished match. |
+| Pick-up deadline missed | `🚫 Forfeit — Pick-up Cup #N [Round]` · "[Team] did not submit by deadline. [Other Team] advances." · Admin pinged if both teams missed. |
+| Pick-up cup complete | `🥇 Pick-up Cup #N Complete!` · "Winner: **[Team]** · Full bracket: play.mlbb.site/pickup-cup-N/" |
+
+**`@everyone` visibility**: the notifications channel is read-only for all members so the
+full community can follow match activity without needing to be in a specific team.
 
 ---
 
@@ -638,7 +651,7 @@ Sunday 23:00 PST (07:00 UTC Monday)
    b. Run circle-method round-robin for N teams
    c. Create sp_event WP posts for each matchup (via REST)
    d. Populate mlbb_match_schedule with Thu–Sun windows for each round
-3. Post #announcements embed: season bracket ready, link to league pages
+3. Post to #match-notifications: season bracket ready, link to league pages
 
 4. Eruditio:
    a. Admin runs /admin assign-eruditio "Spring 2026"
@@ -743,18 +756,12 @@ DB_PREFIX=wp_
 # Claude API (for screenshot parsing)
 ANTHROPIC_API_KEY=
 
-# Channel IDs
-ANNOUNCEMENTS_CHANNEL_ID=
-MATCH_RESULTS_CHANNEL_ID=
-MATCH_REMINDERS_CHANNEL_ID=
-LEAGUE_UPDATES_CHANNEL_ID=
-
-# Channel IDs (continued)
-PICKUP_TOURNAMENT_CHANNEL_ID=  # #pickup-tournaments announcements channel
-
-# Voice channel settings
-# All auto-created match VCs (league + pick-up) are placed in this category
+# Voice channel category — all match VCs and the notifications channel live here
 MATCH_VOICE_CATEGORY_ID=1488715625172959272
+
+# Notifications text channel — auto-created in MATCH_VOICE_CATEGORY_ID on first startup
+# if the channel does not already exist. Bot stores the resolved ID here after creation.
+MATCH_NOTIFICATIONS_CHANNEL_ID=
 MATCH_WINDOW_START_HOUR=19     # 7 PM PST — Thursday window open
 MATCH_WINDOW_END_HOUR=23       # 11 PM PST — Sunday window close
 MATCH_WINDOW_TZ=America/Los_Angeles
@@ -862,7 +869,7 @@ Round 1 — Quarter-Finals (4 matches, parallel)
     ├── Create 4 voice channels: "🏆 Pick-up Cup #N — QF M"
     │       (private: only the two matched teams + staff — see Voice Channel Permissions)
     ├── deadline = NOW() + 48h
-    └── Post bracket embed to #pickup-tournaments
+    └── Post bracket embed to #match-notifications
     │
     │ (each match: /match submit → confirm → winner recorded)
     │ (when all 4 QF complete → advance_round fires)
@@ -873,7 +880,7 @@ Round 2 — Semi-Finals (2 matches, parallel)
     ├── Create 2 voice channels: "🏆 Pick-up Cup #N — SF M"
     │       (private: only the two matched teams + staff)
     ├── deadline = NOW() + 48h
-    └── Post updated bracket embed
+    └── Post updated bracket embed to #match-notifications
     │
     ▼
 Round 3 — Final (1 match)
@@ -882,7 +889,7 @@ Round 3 — Final (1 match)
     ├── Create 1 voice channel: "🏆 Pick-up Cup #N — Final"
     │       (private: only the two matched teams + staff)
     ├── deadline = NOW() + 48h
-    └── Post final bracket embed
+    └── Post final bracket embed to #match-notifications
     │
     ▼
 Tournament complete
