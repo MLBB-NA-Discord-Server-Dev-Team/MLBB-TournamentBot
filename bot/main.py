@@ -59,6 +59,7 @@ class TournamentBot(commands.Bot):
         logger.info("TournamentBot ready — logged in as %s (ID: %s)", self.user, self.user.id)
         await self._bootstrap_notifications_channel()
         await self._bootstrap_admin_log_channel()
+        await self._bootstrap_bot_commands_channel()
 
     async def _bootstrap_notifications_channel(self):
         """
@@ -144,6 +145,46 @@ class TournamentBot(commands.Bot):
             config.ADMIN_LOG_CHANNEL_ID = channel.id
             logger.info("Created admin log channel: #%s (%s)", channel.name, channel.id)
             _write_env_key("ADMIN_LOG_CHANNEL_ID", str(channel.id))
+            return
+
+    async def _bootstrap_bot_commands_channel(self):
+        """
+        Ensure #bot-commands exists in MATCH_VOICE_CATEGORY_ID.
+        Visible only to ADMIN_ROLES — organizers and @everyone denied.
+        """
+        if not config.MATCH_VOICE_CATEGORY_ID:
+            return
+
+        for guild in self.guilds:
+            category = guild.get_channel(config.MATCH_VOICE_CATEGORY_ID)
+            if not isinstance(category, discord.CategoryChannel):
+                continue
+
+            existing = discord.utils.get(category.text_channels, name="bot-commands")
+            if existing:
+                config.BOT_COMMANDS_CHANNEL_ID = existing.id
+                logger.info("Bot commands channel: #%s (%s)", existing.name, existing.id)
+                return
+
+            overwrites = {
+                guild.default_role: discord.PermissionOverwrite(view_channel=False)
+            }
+            for role in guild.roles:
+                if role.name in config.ADMIN_ROLES:
+                    overwrites[role] = discord.PermissionOverwrite(
+                        view_channel=True, send_messages=True, read_message_history=True
+                    )
+
+            channel = await guild.create_text_channel(
+                "bot-commands",
+                category=category,
+                overwrites=overwrites,
+                topic="Admin-only channel for running tournament management bot commands.",
+                reason="TournamentBot bootstrap",
+            )
+            config.BOT_COMMANDS_CHANNEL_ID = channel.id
+            logger.info("Created bot commands channel: #%s (%s)", channel.name, channel.id)
+            _write_env_key("BOT_COMMANDS_CHANNEL_ID", str(channel.id))
             return
 
     async def close(self):
