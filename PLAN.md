@@ -1,7 +1,7 @@
 # MLBB-TournamentBot — Full Implementation Plan
 
 **Created**: March 29, 2026
-**Updated**: March 30, 2026
+**Updated**: April 1, 2026
 **Status**: Approved for implementation
 **Database**: `playmlbb_db` (MySQL, localhost) — shared with play.mlbb.site WordPress/SportsPress
 **Bot Framework**: Discord.py 2.x, async, cog-based (follows MLBB-TeddyBot-v3 pattern)
@@ -201,6 +201,60 @@ CREATE TABLE mlbb_voice_channels (
 );
 ```
 
+### 2.9 `mlbb_pickup_pool`
+Teams waiting to be slotted into the next pick-up tournament bracket.
+Rolls over continuously — every 8 teams that accumulate fire a new bracket automatically.
+
+```sql
+CREATE TABLE mlbb_pickup_pool (
+    id            INT AUTO_INCREMENT PRIMARY KEY,
+    sp_team_id    BIGINT UNSIGNED NOT NULL UNIQUE,  -- wp_posts.ID (sp_team)
+    joined_by     VARCHAR(20) NOT NULL,             -- Discord ID (captain)
+    joined_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX (joined_at)   -- FIFO order for seeding
+);
+```
+
+### 2.10 `mlbb_pickup_tournaments`
+One row per auto-generated single-elimination bracket.
+
+```sql
+CREATE TABLE mlbb_pickup_tournaments (
+    id                INT AUTO_INCREMENT PRIMARY KEY,
+    sp_tournament_id  BIGINT UNSIGNED NOT NULL,   -- wp_posts.ID (sp_tournament)
+    tournament_name   VARCHAR(100) NOT NULL,      -- e.g. "Pick-up Cup #7"
+    total_teams       TINYINT UNSIGNED DEFAULT 8,
+    current_round     TINYINT UNSIGNED DEFAULT 1, -- 1=QF, 2=SF, 3=Final
+    status            ENUM('active','completed','cancelled') DEFAULT 'active',
+    created_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
+    completed_at      DATETIME DEFAULT NULL
+);
+```
+
+### 2.11 `mlbb_pickup_matches`
+One row per individual match within a pick-up bracket.
+
+```sql
+CREATE TABLE mlbb_pickup_matches (
+    id                    INT AUTO_INCREMENT PRIMARY KEY,
+    pickup_tournament_id  INT NOT NULL,             -- FK mlbb_pickup_tournaments.id
+    sp_event_id           BIGINT UNSIGNED NOT NULL, -- wp_posts.ID (sp_event)
+    round                 TINYINT UNSIGNED NOT NULL, -- 1=QF, 2=SF, 3=Final
+    match_number          TINYINT UNSIGNED NOT NULL, -- position within round (1–4 QF, 1–2 SF, 1 Final)
+    home_team_id          BIGINT UNSIGNED NOT NULL,
+    away_team_id          BIGINT UNSIGNED NOT NULL,
+    winner_team_id        BIGINT UNSIGNED DEFAULT NULL,
+    discord_channel_id    VARCHAR(20) DEFAULT NULL,  -- temp voice channel
+    deadline              DATETIME NOT NULL,          -- created_at + 48h
+    status                ENUM('pending','active','completed','forfeited','admin_review') DEFAULT 'pending',
+    created_at            DATETIME DEFAULT CURRENT_TIMESTAMP,
+    completed_at          DATETIME DEFAULT NULL,
+    INDEX (pickup_tournament_id),
+    INDEX (round),
+    INDEX (deadline)
+);
+```
+
 ---
 
 ## 3. Data Access Layer
@@ -281,6 +335,19 @@ Background task loop. Runs every 60 seconds.
 
 7. **Match reminders**: post 24h-before and 1h-before reminders to `#match-reminders`.
 
+8. **Pick-up pool monitor**: check `mlbb_pickup_pool` row count; if count % 8 == 0 and > 0,
+   fire `pickup.create_bracket()`. Runs every 60 seconds alongside other scheduler tasks.
+
+9. **Pick-up deadline enforcement**: query `mlbb_pickup_matches` where
+   `status = 'active'` and `deadline < NOW()`. For each:
+   - If one team submitted: advance submitting team, mark other forfeited
+   - If neither submitted: mark `admin_review`, ping admins in `#pickup-tournaments`
+   - Delete expired voice channel, log to `mlbb_voice_channels`
+
+10. **Pick-up round advancement**: after each match result is confirmed, check if all
+    matches in the current round are complete. If yes, call `pickup.advance_round()`
+    to generate the next round's matches, channels, and deadlines.
+
 ### 3.6 `services/round_robin.py`
 Generates a round-robin match schedule for N teams.
 
@@ -296,7 +363,42 @@ Generates a round-robin match schedule for N teams.
 3. Create one `sp_event` post per matchup via WP REST API
 4. Populate `mlbb_match_schedule` with Thu–Sun windows for each round
 
-### 3.7 `services/eruditio.py`
+### 3.8 `services/pickup.py`
+Manages the rolling pick-up tournament pool and bracket lifecycle.
+
+**Pool management:**
+- `join_pool(sp_team_id, discord_id)` — insert into `mlbb_pickup_pool`; trigger bracket if count % 8 == 0
+- `leave_pool(sp_team_id)` — remove from pool (only while not yet bracketed)
+- `get_pool_count()` → current number of waiting teams
+- `get_pool_position(sp_team_id)` → ordinal position in FIFO queue
+
+**Bracket creation (fires automatically when pool reaches 8):**
+1. Dequeue next 8 teams from pool (ordered by `joined_at` ASC)
+2. Determine tournament number: `SELECT COUNT(*)+1 FROM mlbb_pickup_tournaments`
+3. Create `sp_tournament` WP post: title = "Pick-up Cup #N", status = publish
+4. Seed teams: positions 1–8 by join order
+5. Generate QF pairings: seed 1 vs 8, 2 vs 7, 3 vs 6, 4 vs 5
+6. For each QF pair:
+   - Create `sp_event` WP post (teams assigned, no result yet)
+   - Create temp voice channel: "🏆 Pick-up Cup #N — QF Match M"
+   - Set deadline = NOW() + 48h
+   - Insert `mlbb_pickup_matches` row
+7. Insert `mlbb_pickup_tournaments` row
+8. Post bracket announcement embed to `#pickup-tournaments` channel
+
+**Round advancement (fires when all matches in current round are completed):**
+1. Collect winners from completed round
+2. For SF (round 2): pair QF1 winner vs QF2 winner, QF3 winner vs QF4 winner
+3. For Final (round 3): pair SF1 winner vs SF2 winner
+4. Repeat steps 6–8 from bracket creation for new round
+5. On tournament completion: post final result embed, archive sp_tournament
+
+**Deadline enforcement (checked by scheduler):**
+- If `deadline < NOW()` and `status = 'active'` and no submission: mark `forfeited`
+  - Team that submitted results (or submitted first if both did) advances
+  - If neither submitted: admin review flag, ping `#pickup-tournaments`
+
+### 3.9 `services/eruditio.py`
 Random team assignment for the Free Play (Eruditio) league.
 
 **Season start flow:**
@@ -419,7 +521,50 @@ Full schedule: play.mlbb.site/moniyan-league/
 - 0.60–0.84: Display with warning, require admin + captain confirmation
 - < 0.60: Reject automatically, request clearer screenshot
 
-### 4.6 `cogs/admin.py`
+### 4.6 `cogs/pickup.py`
+
+Pick-up tournament pool and bracket commands. Separate from league play — any team can join
+the pool at any time, independent of the current league season.
+
+| Command | Description | Roles |
+|---------|-------------|-------|
+| `/pickup join` | Add your team to the rolling tournament pool | Captain |
+| `/pickup leave` | Remove your team from the pool (before bracket fires) | Captain |
+| `/pickup status` | Show pool size and your team's queue position | Everyone |
+| `/pickup bracket [#N\|current]` | Display bracket for a specific pick-up cup | Everyone |
+| `/pickup history` | List completed pick-up cups with results | Everyone |
+
+**`/pickup status` embed example:**
+```
+🎯 Pick-up Tournament Pool
+──────────────────────────
+Teams in pool:   5 / 8
+Next bracket:    3 more teams needed
+
+Your team:  Team Nexus — Queue position #3
+            Joined: Today at 2:34 PM
+
+Tip: Use /pickup leave to withdraw before the bracket fires.
+```
+
+**`/pickup bracket` embed example:**
+```
+🏆 Pick-up Cup #7 — Single Elimination
+────────────────────────────────────────
+Quarter-Finals          Semi-Finals         Final
+Team Nexus      ─┐
+  vs            ├──► Team Nexus ─┐
+Team Vortex     ─┘               │
+                                 ├──► ???
+Team Storm      ─┐               │
+  vs            ├──► ???      ───┘
+Team Apex       ─┘
+
+⏰ QF Deadline: Apr 3, 11:59 PM PST
+📋 play.mlbb.site/pickup-cup-7/
+```
+
+### 4.7 `cogs/admin.py`
 
 | Command | Description | Roles |
 |---------|-------------|-------|
@@ -433,6 +578,8 @@ Full schedule: play.mlbb.site/moniyan-league/
 | `/admin season-start [season_name]` | Trigger round-robin generation for all leagues | Admin |
 | `/admin assign-eruditio [season_name]` | Run random team assignment for Eruditio | Admin |
 | `/admin resolve-dispute [submission_id] [home_score] [away_score]` | Admin override for disputed result | Admin |
+| `/admin pickup-advance [match_id] [winner_team]` | Manually advance a pick-up match (deadline miss, dispute) | Admin |
+| `/admin pickup-cancel [tournament_id]` | Cancel an active pick-up cup and return teams to pool | Admin |
 
 ---
 
@@ -472,6 +619,12 @@ Sunday 23:00 PST (07:00 UTC Monday)
 | Match window closes (24h) | #match-reminders | "⏰ Match window closes in 24 hours. Unplayed matches will be reviewed by admins." |
 | Match confirmed | #match-results | Confirmation embed with final score |
 | Dispute raised | #match-results + DMs | "⚠️ Result disputed — admins have been notified." |
+| Pick-up pool: 8 teams ready | #pickup-tournaments | "🏆 Bracket firing! Pick-up Cup #N is starting — 8 teams locked in." |
+| Pick-up bracket created | #pickup-tournaments | Bracket embed with QF pairings + 48h deadline |
+| Pick-up round advance | #pickup-tournaments | Updated bracket embed showing next round pairings + new deadline |
+| Pick-up deadline approaching (12h) | #pickup-tournaments + DMs to captains | "⏰ Your pick-up match deadline is in 12 hours. Submit results or contact your opponent." |
+| Pick-up deadline missed | #pickup-tournaments + admin ping | "⚠️ Match forfeited — [Team] did not submit by deadline." |
+| Pick-up cup complete | #pickup-tournaments | "🥇 Pick-up Cup #N complete! Winner: [Team]. Results at play.mlbb.site/pickup-cup-N/" |
 
 ---
 
@@ -545,6 +698,7 @@ MLBB-TournamentBot/
 │       ├── tournament.py
 │       ├── league.py
 │       ├── match.py
+│       ├── pickup.py
 │       └── admin.py
 │
 └── services/
@@ -555,7 +709,8 @@ MLBB-TournamentBot/
     ├── registration.py              ← registration period logic
     ├── scheduler.py                 ← background task loop (60s tick)
     ├── round_robin.py               ← circle-method bracket generation
-    └── eruditio.py                  ← random team assignment for Free Play
+    ├── eruditio.py                  ← random team assignment for Free Play
+    └── pickup.py                    ← rolling pick-up tournament pool + bracket lifecycle
 ```
 
 ---
@@ -593,8 +748,12 @@ MATCH_RESULTS_CHANNEL_ID=
 MATCH_REMINDERS_CHANNEL_ID=
 LEAGUE_UPDATES_CHANNEL_ID=
 
+# Channel IDs (continued)
+PICKUP_TOURNAMENT_CHANNEL_ID=  # #pickup-tournaments announcements channel
+
 # Voice channel settings
-MATCH_VOICE_CATEGORY_ID=       # Discord category for auto-created match channels
+MATCH_VOICE_CATEGORY_ID=       # Discord category for auto-created league match channels
+PICKUP_VOICE_CATEGORY_ID=      # Discord category for auto-created pick-up match channels
 MATCH_WINDOW_START_HOUR=19     # 7 PM PST — Thursday window open
 MATCH_WINDOW_END_HOUR=23       # 11 PM PST — Sunday window close
 MATCH_WINDOW_TZ=America/Los_Angeles
@@ -643,6 +802,15 @@ MATCH_WINDOW_TZ=America/Los_Angeles
 - [ ] Notification embeds (registration, match reminders, season start)
 - [ ] Post-window admin flag for uncompleted matches
 
+### Phase 5b — Pick-up Tournaments
+- [ ] Add `mlbb_pickup_pool`, `mlbb_pickup_tournaments`, `mlbb_pickup_matches` to `db/migrate.py`
+- [ ] `services/pickup.py` — pool management, bracket creation, round advancement, deadline enforcement
+- [ ] `cogs/pickup.py` — `/pickup join`, `/pickup leave`, `/pickup status`, `/pickup bracket`
+- [ ] Scheduler items 8–10: pool monitor, deadline enforcement, round advancement
+- [ ] 12h deadline reminder DMs to captains
+- [ ] `/admin pickup-advance`, `/admin pickup-cancel`
+- [ ] Pick-up Cup `sp_tournament` page creation on play.mlbb.site (bracket view via shortcode)
+
 ### Phase 6 — Polish & Reliability
 - [ ] Systemd service definition (`/etc/systemd/system/tournament.service`)
 - [ ] Graceful shutdown (drain pending tasks, close DB pool)
@@ -672,6 +840,58 @@ On `/player register`, bot:
 1. Checks if Discord ID already exists in any `sp_metrics`
 2. If not: creates `sp_player` post via REST, sets `sp_metrics` with Discord ID
 3. If yes: returns existing player profile
+
+### Pick-up Tournament — Bracket Flow
+
+**Format**: Single elimination, BO1 (shoot-out). 8 teams → 3 rounds (QF/SF/Final).
+**Trigger**: Automatic — fires the moment 8 teams accumulate in `mlbb_pickup_pool`.
+**Seeding**: FIFO join order (first in = seed 1). No rank-based seeding.
+
+```
+Pool reaches 8 teams
+    │
+    ▼
+Create sp_tournament "Pick-up Cup #N"   (WP REST API)
+Dequeue 8 teams from mlbb_pickup_pool
+Seed: 1 vs 8, 2 vs 7, 3 vs 6, 4 vs 5
+    │
+    ▼
+Round 1 — Quarter-Finals (4 matches, parallel)
+    ├── Create 4 sp_event posts
+    ├── Create 4 voice channels: "🏆 Pick-up Cup #N — QF M"
+    ├── deadline = NOW() + 48h
+    └── Post bracket embed to #pickup-tournaments
+    │
+    │ (each match: /match submit → confirm → winner recorded)
+    │ (when all 4 QF complete → advance_round fires)
+    ▼
+Round 2 — Semi-Finals (2 matches, parallel)
+    ├── Winners: QF1W vs QF2W, QF3W vs QF4W
+    ├── Create 2 sp_event posts
+    ├── Create 2 voice channels: "🏆 Pick-up Cup #N — SF M"
+    ├── deadline = NOW() + 48h
+    └── Post updated bracket embed
+    │
+    ▼
+Round 3 — Final (1 match)
+    ├── Winners: SF1W vs SF2W
+    ├── Create 1 sp_event post
+    ├── Create 1 voice channel: "🏆 Pick-up Cup #N — Final"
+    ├── deadline = NOW() + 48h
+    └── Post final bracket embed
+    │
+    ▼
+Tournament complete
+    ├── Mark sp_tournament complete
+    ├── Post winner announcement embed
+    ├── Delete any remaining voice channels
+    └── sp_tournament page on play.mlbb.site shows final bracket
+```
+
+**Deadline miss handling:**
+- One team submitted, other did not → submitting team auto-advances (forfeit win)
+- Neither submitted → admin review; admins choose to extend or assign a winner
+- Admin override: `/admin pickup-advance [match_id] [winner_team]`
 
 ### Round-Robin — Circle Method
 For N teams, fix team[0] and rotate others through N-1 rounds:
