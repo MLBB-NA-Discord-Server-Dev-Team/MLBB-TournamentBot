@@ -47,6 +47,7 @@ ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
 # ── Voice channels & notifications ────────────────────────────────────────
 MATCH_VOICE_CATEGORY_ID: int = int(os.getenv("MATCH_VOICE_CATEGORY_ID", "0") or "0")
 MATCH_NOTIFICATIONS_CHANNEL_ID: int = int(os.getenv("MATCH_NOTIFICATIONS_CHANNEL_ID", "0") or "0")
+ADMIN_LOG_CHANNEL_ID: int = int(os.getenv("ADMIN_LOG_CHANNEL_ID", "0") or "0")
 
 # Match play window: Thu–Sun, 7 PM – 11 PM PST
 MATCH_WINDOW_START_HOUR: int = int(os.getenv("MATCH_WINDOW_START_HOUR", "19"))

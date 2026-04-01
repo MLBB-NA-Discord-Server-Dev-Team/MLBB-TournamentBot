@@ -15,7 +15,8 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import config
-from services import db
+from services import db, admin_log
+from services.admin_log import Event
 from services.db_helpers import get_captain_team
 from services import match_parser
 from services.match_parser import MatchParseError, WARN_CONFIDENCE
@@ -193,6 +194,15 @@ class Match(commands.Cog):
             ephemeral=True,
         )
 
+        await admin_log.log(self.bot, Event.MATCH_SUBMITTED, user=interaction.user, fields={
+            "Submission ID": f"#{submission_id}",
+            "Winning Team": captain["team_name"],
+            "Score": f"{result.winner_kills}–{result.loser_kills}",
+            "BattleID": result.battle_id,
+            "Confidence": f"{result.confidence:.0%}",
+            "Event ID": event_id or "—",
+        })
+
     # ── /match confirm ────────────────────────────────────────────────────
 
     @match_group.command(name="confirm", description="Confirm a pending match result")
@@ -260,6 +270,13 @@ class Match(commands.Cog):
         await interaction.followup.send(
             f"✅ Result `#{submission_id}` confirmed.", ephemeral=True
         )
+
+        await admin_log.log(self.bot, Event.MATCH_CONFIRMED, user=interaction.user, fields={
+            "Submission ID": f"#{submission_id}",
+            "BattleID": battle_id,
+            "Score": f"{winner_kills}–{loser_kills}",
+            "Confirmed by": f"<@{interaction.user.id}>",
+        })
 
     # ── /match dispute ────────────────────────────────────────────────────
 
@@ -342,6 +359,12 @@ class Match(commands.Cog):
         await interaction.followup.send(
             f"⚠️ Dispute filed for `#{submission_id}`. Admins have been notified.", ephemeral=True
         )
+
+        await admin_log.log(self.bot, Event.MATCH_DISPUTED, user=interaction.user, fields={
+            "Submission ID": f"#{submission_id}",
+            "Disputed by": f"<@{interaction.user.id}>",
+            "Reason": reason,
+        })
 
 
 async def setup(bot: commands.Bot):

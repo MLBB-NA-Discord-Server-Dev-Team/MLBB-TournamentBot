@@ -7,7 +7,8 @@ from discord.ext import commands
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 import config
-from services import db
+from services import db, admin_log
+from services.admin_log import Event
 
 
 def admin_check():
@@ -91,6 +92,13 @@ class Admin(commands.Cog):
             f"✅ Submission `#{submission_id}` resolved. Winner set to team `{winner_team_id}`.",
             ephemeral=True,
         )
+
+        await admin_log.log(self.bot, Event.DISPUTE_RESOLVED, user=interaction.user, fields={
+            "Submission ID": f"#{submission_id}",
+            "Winner Team ID": winner_team_id,
+            "Resolved by": f"<@{interaction.user.id}>",
+            "Notes": notes or "—",
+        })
 
     @admin.command(name="pending", description="List all pending match submissions")
     @admin_check()

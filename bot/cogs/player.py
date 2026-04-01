@@ -9,7 +9,8 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import config
-from services import db
+from services import db, admin_log
+from services.admin_log import Event
 from services.db_helpers import get_player_by_discord_id, get_roster
 from services.sportspress import SportsPressAPI
 
@@ -76,6 +77,12 @@ class Player(commands.Cog):
         )
         embed.set_footer(text="Use /team create to start a team, or ask a captain to invite you.")
         await interaction.followup.send(embed=embed, ephemeral=True)
+
+        await admin_log.log(self.bot, Event.PLAYER_REGISTERED, user=interaction.user, fields={
+            "IGN": ign,
+            "Player ID": sp_player_id,
+            "Discord": f"<@{discord_id}>",
+        })
 
     @player.command(name="profile", description="View a player profile")
     @app_commands.describe(user="Discord user (leave blank for yourself)")

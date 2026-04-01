@@ -18,7 +18,8 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import config
-from services import db
+from services import db, admin_log
+from services.admin_log import Event
 from services.db_helpers import (
     get_player_by_discord_id,
     get_captain_team,
@@ -91,6 +92,12 @@ class Teams(commands.Cog):
         embed.add_field(name="Your Role", value="Captain")
         embed.set_footer(text="Use /team invite to add players.")
         await interaction.followup.send(embed=embed, ephemeral=True)
+
+        await admin_log.log(self.bot, Event.TEAM_CREATED, user=interaction.user, fields={
+            "Team": name,
+            "Team ID": sp_team_id,
+            "Captain": f"<@{discord_id}>",
+        })
 
     # ── /team invite ──────────────────────────────────────────────────────
 
@@ -176,6 +183,13 @@ class Teams(commands.Cog):
             f"✅ Invite sent to {user.mention} as **{role}**.", ephemeral=True
         )
 
+        await admin_log.log(self.bot, Event.TEAM_INVITE_SENT, user=interaction.user, fields={
+            "Team": captain["team_name"],
+            "Invitee": f"<@{invitee_id}>",
+            "Role": role,
+            "Expires": f"{INVITE_TTL_HOURS}h",
+        })
+
     # ── /team accept ─────────────────────────────────────────────────────
 
     @team.command(name="accept", description="Accept a pending team invite")
@@ -220,6 +234,12 @@ class Teams(commands.Cog):
             color=0x2ECC71,
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
+
+        await admin_log.log(self.bot, Event.TEAM_INVITE_ACCEPTED, user=interaction.user, fields={
+            "Team": invite["team_name"],
+            "Player": f"<@{discord_id}>",
+            "Role": invite["role"],
+        })
 
     # ── /team kick ────────────────────────────────────────────────────────
 
@@ -271,6 +291,12 @@ class Teams(commands.Cog):
         await interaction.followup.send(
             f"✅ {user.mention} removed from **{captain['team_name']}**.", ephemeral=True
         )
+
+        await admin_log.log(self.bot, Event.PLAYER_KICKED, user=interaction.user, fields={
+            "Team": captain["team_name"],
+            "Kicked": f"<@{target_id}>",
+            "Captain": f"<@{discord_id}>",
+        })
 
     # ── /team roster ──────────────────────────────────────────────────────
 

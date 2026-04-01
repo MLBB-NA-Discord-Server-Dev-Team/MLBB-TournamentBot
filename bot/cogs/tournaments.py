@@ -116,5 +116,95 @@ class Tournaments(commands.Cog):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
 
+    @tournament.command(name="help", description="List all available bot commands")
+    async def tournament_help(self, interaction: discord.Interaction):
+        is_staff = config.has_staff_role([r.name for r in interaction.user.roles])
+
+        embed = discord.Embed(
+            title="🏆 PLAY.MLBB.SITE — Bot Commands",
+            description="All commands are slash commands. Staff-only commands are marked 🔒.",
+            color=0x3A86FF,
+        )
+
+        embed.add_field(
+            name="👤 Player",
+            value=(
+                "`/player register [ign]` — Link your Discord to an MLBB player profile\n"
+                "`/player profile [@user]` — View a player profile"
+            ),
+            inline=False,
+        )
+
+        embed.add_field(
+            name="🛡️ Team",
+            value=(
+                "`/team create [name]` — Create a team (you become captain)\n"
+                "`/team invite [@user]` — Invite a player *(captain only)*\n"
+                "`/team accept` — Accept a pending team invite\n"
+                "`/team kick [@user]` — Remove a player *(captain only)*\n"
+                "`/team roster [team_id]` — View a team's roster\n"
+                "`/team list` — List all teams"
+            ),
+            inline=False,
+        )
+
+        embed.add_field(
+            name="⚔️ Match Results",
+            value=(
+                "`/match submit [screenshot]` — Submit a win with scoreboard screenshot *(captain only)*\n"
+                "`/match confirm [#id]` — Confirm an opposing team's result *(captain only)*\n"
+                "`/match dispute [#id] [reason]` — Dispute a result *(captain only)*"
+            ),
+            inline=False,
+        )
+
+        embed.add_field(
+            name="🎯 Pick-up Tournaments",
+            value=(
+                "`/pickup status` — View the pick-up pool and your queue position\n"
+                "`/pickup join` — Join the rolling pick-up tournament pool *(captain only — coming soon)*\n"
+                "`/pickup leave` — Leave the pool *(coming soon)*\n"
+                "`/pickup bracket [#n]` — View a pick-up cup bracket *(coming soon)*"
+            ),
+            inline=False,
+        )
+
+        embed.add_field(
+            name="🏆 Tournament",
+            value=(
+                "`/tournament list` — List all tournaments\n"
+                "`/tournament create [name]` — Create a tournament 🔒\n"
+                "`/tournament info [name]` — Tournament details\n"
+                "`/tournament help` — Show this message"
+            ),
+            inline=False,
+        )
+
+        embed.add_field(
+            name="📊 League",
+            value=(
+                "`/league list` — List all leagues\n"
+                "`/league standings [name]` — View standings\n"
+                "`/league create [name]` — Create a league 🔒"
+            ),
+            inline=False,
+        )
+
+        if is_staff:
+            embed.add_field(
+                name="🔒 Admin",
+                value=(
+                    "`/admin pending` — List pending match submissions\n"
+                    "`/admin resolve-dispute [#id] [winner_team_id]` — Override a disputed result\n"
+                    "`/tournament create/delete` — Manage tournament posts\n"
+                    "`/league create/delete` — Manage league posts"
+                ),
+                inline=False,
+            )
+
+        embed.set_footer(text="play.mlbb.site · Results, standings, and brackets posted automatically.")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
 async def setup(bot: commands.Bot):
     await bot.add_cog(Tournaments(bot))
