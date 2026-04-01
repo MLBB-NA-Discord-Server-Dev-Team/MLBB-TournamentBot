@@ -1,5 +1,10 @@
 """
-SportsPress API Service — WordPress REST API client
+SportsPress API Service — REST client for play.mlbb.site
+
+SportsPress registers its post types under /wp-json/sportspress/v2/ (not wp/v2):
+  teams, players, events, tables, tournaments, leagues, seasons, calendars ...
+
+wp/v2 is still used for media uploads and generic post meta writes.
 """
 import logging
 import base64
@@ -10,33 +15,44 @@ logger = logging.getLogger(__name__)
 
 
 class SportsPressAPI:
-    """Async client for WordPress REST API with SportsPress post types"""
+    """Async client for the SportsPress v2 REST API"""
 
     def __init__(self, base_url: str, username: str, app_password: str):
-        self.base_url = base_url.rstrip('/')
-        self.api_url = f"{self.base_url}/wp-json/wp/v2"
+        self.base_url = base_url.rstrip("/")
+        self.sp_url = f"{self.base_url}/wp-json/sportspress/v2"
+        self.wp_url = f"{self.base_url}/wp-json/wp/v2"
         token = base64.b64encode(f"{username}:{app_password}".encode()).decode()
         self.headers = {
             "Authorization": f"Basic {token}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }
 
-    async def _get(self, endpoint: str, params: Dict = None) -> Any:
-        url = f"{self.api_url}/{endpoint}"
+    # ── Internal helpers ───────────────────────────────────────────────────
+
+    async def _get(self, endpoint: str, params: Dict = None, base: str = None) -> Any:
+        url = f"{base or self.sp_url}/{endpoint}"
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=self.headers, params=params or {}) as r:
                 r.raise_for_status()
                 return await r.json()
 
-    async def _post(self, endpoint: str, data: Dict) -> Any:
-        url = f"{self.api_url}/{endpoint}"
+    async def _post(self, endpoint: str, data: Dict, base: str = None) -> Any:
+        url = f"{base or self.sp_url}/{endpoint}"
         async with aiohttp.ClientSession() as session:
             async with session.post(url, headers=self.headers, json=data) as r:
                 r.raise_for_status()
                 return await r.json()
 
-    async def _delete(self, endpoint: str) -> Any:
-        url = f"{self.api_url}/{endpoint}"
+    async def _patch(self, endpoint: str, data: Dict, base: str = None) -> Any:
+        url = f"{base or self.sp_url}/{endpoint}"
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=self.headers, json=data) as r:
+                # WP REST uses POST for updates too (no PATCH needed with _method)
+                r.raise_for_status()
+                return await r.json()
+
+    async def _delete(self, endpoint: str, base: str = None) -> Any:
+        url = f"{base or self.sp_url}/{endpoint}"
         async with aiohttp.ClientSession() as session:
             async with session.delete(url, headers=self.headers, params={"force": True}) as r:
                 r.raise_for_status()
@@ -45,75 +61,85 @@ class SportsPressAPI:
     # ── Teams ──────────────────────────────────────────────────────────────
 
     async def list_teams(self) -> List[Dict]:
-        return await self._get("sp_team", {"per_page": 100, "status": "publish"})
+        return await self._get("teams", {"per_page": 100, "status": "publish"})
 
     async def create_team(self, name: str, description: str = "") -> Dict:
-        return await self._post("sp_team", {
+        return await self._post("teams", {
             "title": name,
             "content": description,
-            "status": "publish"
+            "status": "publish",
         })
 
     async def delete_team(self, post_id: int) -> Dict:
-        return await self._delete(f"sp_team/{post_id}")
+        return await self._delete(f"teams/{post_id}")
 
     # ── Players ────────────────────────────────────────────────────────────
 
     async def list_players(self, team_id: Optional[int] = None) -> List[Dict]:
-        params = {"per_page": 100, "status": "publish"}
-        return await self._get("sp_player", params)
+        params: Dict = {"per_page": 100, "status": "publish"}
+        if team_id:
+            params["teams"] = team_id
+        return await self._get("players", params)
 
     async def create_player(self, name: str, team_ids: List[int], description: str = "") -> Dict:
-        return await self._post("sp_player", {
-            "title": name,
-            "content": description,
-            "status": "publish",
-            "sp_team": team_ids
-        })
+        data: Dict = {"title": name, "content": description, "status": "publish"}
+        if team_ids:
+            data["teams"] = team_ids
+        return await self._post("players", data)
+
+    async def delete_player(self, post_id: int) -> Dict:
+        return await self._delete(f"players/{post_id}")
 
     # ── Tournaments ────────────────────────────────────────────────────────
 
     async def list_tournaments(self) -> List[Dict]:
-        return await self._get("sp_tournament", {"per_page": 100, "status": "publish"})
+        return await self._get("tournaments", {"per_page": 100, "status": "publish"})
 
     async def create_tournament(self, name: str, description: str = "") -> Dict:
-        return await self._post("sp_tournament", {
+        return await self._post("tournaments", {
             "title": name,
             "content": description,
-            "status": "publish"
+            "status": "publish",
         })
 
     async def delete_tournament(self, post_id: int) -> Dict:
-        return await self._delete(f"sp_tournament/{post_id}")
+        return await self._delete(f"tournaments/{post_id}")
 
-    # ── Leagues (Tables) ───────────────────────────────────────────────────
+    # ── Tables (League standings) ──────────────────────────────────────────
 
-    async def list_leagues(self) -> List[Dict]:
-        return await self._get("sp_table", {"per_page": 100, "status": "publish"})
+    async def list_tables(self) -> List[Dict]:
+        return await self._get("tables", {"per_page": 100, "status": "publish"})
 
-    async def create_league(self, name: str, description: str = "") -> Dict:
-        return await self._post("sp_table", {
+    async def create_table(self, name: str, description: str = "") -> Dict:
+        return await self._post("tables", {
             "title": name,
             "content": description,
-            "status": "publish"
+            "status": "publish",
         })
 
-    async def delete_league(self, post_id: int) -> Dict:
-        return await self._delete(f"sp_table/{post_id}")
+    async def delete_table(self, post_id: int) -> Dict:
+        return await self._delete(f"tables/{post_id}")
 
     # ── Events (Matches) ───────────────────────────────────────────────────
 
     async def list_events(self) -> List[Dict]:
-        return await self._get("sp_event", {"per_page": 100, "status": "publish", "orderby": "date", "order": "desc"})
+        return await self._get("events", {
+            "per_page": 100, "status": "publish", "orderby": "date", "order": "desc"
+        })
 
-    async def create_event(self, name: str, home_team: int, away_team: int, date: str, description: str = "") -> Dict:
-        return await self._post("sp_event", {
+    async def create_event(
+        self, name: str, home_team: int, away_team: int, date: str, description: str = ""
+    ) -> Dict:
+        return await self._post("events", {
             "title": name,
             "content": description,
             "status": "publish",
-            "sp_team": [home_team, away_team],
-            "meta": {"sp_date": date}
+            "teams": [home_team, away_team],
+            "date": date,
         })
+
+    async def delete_event(self, post_id: int) -> Dict:
+        return await self._delete(f"events/{post_id}")
 
     # ── Player metrics (Discord linkage) ───────────────────────────────────
 
@@ -126,12 +152,4 @@ class SportsPressAPI:
             "discorddiscriminator": "0",
         }
         serialised = phpserialize.dumps(metrics).decode()
-        url = f"{self.api_url}/sp_player/{player_id}"
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                url,
-                headers=self.headers,
-                json={"meta": {"sp_metrics": serialised}},
-            ) as r:
-                r.raise_for_status()
-                return await r.json()
+        return await self._post(f"players/{player_id}", {"meta": {"sp_metrics": serialised}})
