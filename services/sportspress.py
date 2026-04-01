@@ -114,3 +114,24 @@ class SportsPressAPI:
             "sp_team": [home_team, away_team],
             "meta": {"sp_date": date}
         })
+
+    # ── Player metrics (Discord linkage) ───────────────────────────────────
+
+    async def set_player_discord(self, player_id: int, discord_id: str, discord_username: str) -> Dict:
+        """Write discordid + discordusername into sp_metrics on an sp_player post."""
+        import phpserialize
+        metrics = {
+            "discordid": discord_id,
+            "discordusername": discord_username,
+            "discorddiscriminator": "0",
+        }
+        serialised = phpserialize.dumps(metrics).decode()
+        url = f"{self.api_url}/sp_player/{player_id}"
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                url,
+                headers=self.headers,
+                json={"meta": {"sp_metrics": serialised}},
+            ) as r:
+                r.raise_for_status()
+                return await r.json()
