@@ -753,8 +753,8 @@ LEAGUE_UPDATES_CHANNEL_ID=
 PICKUP_TOURNAMENT_CHANNEL_ID=  # #pickup-tournaments announcements channel
 
 # Voice channel settings
-MATCH_VOICE_CATEGORY_ID=       # Discord category for auto-created league match channels
-PICKUP_VOICE_CATEGORY_ID=      # Discord category for auto-created pick-up match channels
+# All auto-created match VCs (league + pick-up) are placed in this category
+MATCH_VOICE_CATEGORY_ID=1488715625172959272
 MATCH_WINDOW_START_HOUR=19     # 7 PM PST — Thursday window open
 MATCH_WINDOW_END_HOUR=23       # 11 PM PST — Sunday window close
 MATCH_WINDOW_TZ=America/Los_Angeles
@@ -910,8 +910,9 @@ All leagues use **round-robin** format. MLBB does not use snake draft.
 Draft pick leagues use in-game hero draft during the match itself — this is not managed by the bot.
 
 ### Voice Channel Permissions
-All auto-created match voice channels are **private** — visible only to the players on the
-two matched teams, plus staff. `@everyone` is denied by default.
+All auto-created match voice channels are created under a single dedicated Discord category
+(`MATCH_VOICE_CATEGORY_ID`) and are **private** — visible only to the players on the two
+matched teams, plus staff. `@everyone` is denied by default.
 
 **Permission overwrites applied at channel creation:**
 ```
