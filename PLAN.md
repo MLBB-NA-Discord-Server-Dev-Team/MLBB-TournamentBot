@@ -322,7 +322,8 @@ Background task loop. Runs every 60 seconds.
    generate the week's Thu–Sun play window entries in `mlbb_match_schedule`.
 
 3. **Voice channel creation** (Thursday at play start time): create one voice channel per
-   active league match window. Write to `mlbb_voice_channels`.
+   active league match window. Permissions set to matched teams only (see Voice Channel
+   Permissions). Write to `mlbb_voice_channels`.
 
 4. **Discord event creation**: create a Discord scheduled event for each match window.
    Name format: `🏟️ [League Name] — Week N Play Window`. Write to `mlbb_discord_events`.
@@ -859,6 +860,7 @@ Seed: 1 vs 8, 2 vs 7, 3 vs 6, 4 vs 5
 Round 1 — Quarter-Finals (4 matches, parallel)
     ├── Create 4 sp_event posts
     ├── Create 4 voice channels: "🏆 Pick-up Cup #N — QF M"
+    │       (private: only the two matched teams + staff — see Voice Channel Permissions)
     ├── deadline = NOW() + 48h
     └── Post bracket embed to #pickup-tournaments
     │
@@ -869,6 +871,7 @@ Round 2 — Semi-Finals (2 matches, parallel)
     ├── Winners: QF1W vs QF2W, QF3W vs QF4W
     ├── Create 2 sp_event posts
     ├── Create 2 voice channels: "🏆 Pick-up Cup #N — SF M"
+    │       (private: only the two matched teams + staff)
     ├── deadline = NOW() + 48h
     └── Post updated bracket embed
     │
@@ -877,6 +880,7 @@ Round 3 — Final (1 match)
     ├── Winners: SF1W vs SF2W
     ├── Create 1 sp_event post
     ├── Create 1 voice channel: "🏆 Pick-up Cup #N — Final"
+    │       (private: only the two matched teams + staff)
     ├── deadline = NOW() + 48h
     └── Post final bracket embed
     │
@@ -906,10 +910,28 @@ All leagues use **round-robin** format. MLBB does not use snake draft.
 Draft pick leagues use in-game hero draft during the match itself — this is not managed by the bot.
 
 ### Voice Channel Permissions
-Auto-created match voice channels:
-- `@everyone`: View Channel = Allow, Connect = Allow
-- `@Tournament Organizer`: Manage Channels = Allow, Move Members = Allow
-- Muted if channel is empty (bot checks after window_end and deletes)
+All auto-created match voice channels are **private** — visible only to the players on the
+two matched teams, plus staff. `@everyone` is denied by default.
+
+**Permission overwrites applied at channel creation:**
+```
+@everyone              → View Channel = Deny, Connect = Deny
+@Tournament Organizer  → View Channel = Allow, Connect = Allow, Manage Channels = Allow, Move Members = Allow
+@admins                → View Channel = Allow, Connect = Allow, Manage Channels = Allow
+[each Discord member on home team]  → View Channel = Allow, Connect = Allow
+[each Discord member on away team]  → View Channel = Allow, Connect = Allow
+```
+
+**Lookup flow** (same for league matches and pick-up matches):
+1. Query `mlbb_player_roster` for all active players on both `sp_team_id`s
+2. Resolve Discord IDs → `discord.Member` objects in the guild
+3. Apply per-member `PermissionOverwrite(view_channel=True, connect=True)` at creation
+4. Players who have not yet run `/player register` (no Discord ID on file) are excluded
+   — bot logs a warning but does not block channel creation
+
+**Roster changes after channel creation** (e.g. a substitute added mid-match):
+- Captain runs `/team invite` → on accept, bot calls `channel.set_permissions(member, view_channel=True, connect=True)`
+  for every active match voice channel that team is currently participating in
 
 ### WP REST API Write Pattern
 All WordPress writes use Basic Auth (WP Application Password):
