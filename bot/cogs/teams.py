@@ -26,6 +26,7 @@ from services.db_helpers import (
     get_player_roster_entry,
     get_roster,
     get_any_pending_invite,
+    list_teams,
 )
 from services.sportspress import SportsPressAPI
 
@@ -349,16 +350,16 @@ class Teams(commands.Cog):
     async def team_list(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         try:
-            teams = await get_api().list_teams()
+            teams = await list_teams()
         except Exception as e:
-            await interaction.followup.send(f"❌ API error: {e}", ephemeral=True)
+            await interaction.followup.send(f"❌ DB error: {e}", ephemeral=True)
             return
 
         if not teams:
             await interaction.followup.send("No teams found.", ephemeral=True)
             return
 
-        lines = [f"`{t['id']}` — **{t['title']['rendered']}**" for t in teams[:25]]
+        lines = [f"`{t['id']}` — **{t['title']}**" for t in teams[:25]]
         embed = discord.Embed(
             title=f"Teams ({len(teams)})",
             description="\n".join(lines),

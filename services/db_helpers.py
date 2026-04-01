@@ -200,3 +200,44 @@ async def get_any_pending_invite(invitee_discord_id: str) -> Optional[dict]:
         "role": row[3],
         "team_name": row[4],
     }
+
+
+# ── SportsPress post listings (direct MySQL — no HTTP overhead) ────────────
+
+async def list_posts(post_type: str, limit: int = 100) -> list[dict]:
+    """Generic list of published wp_posts by post_type. Returns [{id, title, link}]."""
+    async with db.get_conn() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                SELECT ID, post_title, guid
+                FROM wp_posts
+                WHERE post_type = %s AND post_status = 'publish'
+                ORDER BY post_date DESC
+                LIMIT %s
+                """,
+                (post_type, limit),
+            )
+            rows = await cur.fetchall()
+    return [{"id": r[0], "title": r[1], "link": r[2]} for r in rows]
+
+
+async def list_teams(limit: int = 100) -> list[dict]:
+    return await list_posts("sp_team", limit)
+
+
+async def list_players(limit: int = 100) -> list[dict]:
+    return await list_posts("sp_player", limit)
+
+
+async def list_tables(limit: int = 100) -> list[dict]:
+    return await list_posts("sp_table", limit)
+
+
+async def list_tournaments(limit: int = 100) -> list[dict]:
+    return await list_posts("sp_tournament", limit)
+
+
+async def list_events(limit: int = 100) -> list[dict]:
+    """List published sp_event posts, newest first."""
+    return await list_posts("sp_event", limit)

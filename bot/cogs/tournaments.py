@@ -9,6 +9,7 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 import config
 from services.sportspress import SportsPressAPI
+from services.db_helpers import list_tournaments as db_list_tournaments
 
 logger = logging.getLogger(__name__)
 
@@ -42,16 +43,16 @@ class Tournaments(commands.Cog):
     async def tournament_list(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         try:
-            items = await get_api().list_tournaments()
+            items = await db_list_tournaments()
         except Exception as e:
-            await interaction.followup.send(f"❌ API error: {e}", ephemeral=True)
+            await interaction.followup.send(f"❌ DB error: {e}", ephemeral=True)
             return
 
         if not items:
             await interaction.followup.send("No tournaments found.", ephemeral=True)
             return
 
-        lines = [f"**{t['id']}** — {t['title']['rendered']}" for t in items]
+        lines = [f"`{t['id']}` — **{t['title']}**" for t in items]
         embed = discord.Embed(title=f"Tournaments ({len(items)})", description="\n".join(lines), color=0x9D4EDD)
         embed.set_footer(text=config.WP_URL)
         await interaction.followup.send(embed=embed, ephemeral=True)

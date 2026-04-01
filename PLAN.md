@@ -259,30 +259,57 @@ CREATE TABLE mlbb_pickup_matches (
 
 ## 3. Data Access Layer
 
+### Design principle — reads vs writes
+
+The bot and WordPress are **co-located on the same server**, so the REST API is never
+the fastest path for reads. All read operations go **direct to MySQL** via the `aiomysql`
+pool. The REST API is used **only for writes** to WordPress/SportsPress data, because WP
+PHP hooks must fire on every write to keep caches valid and trigger SportsPress calculations
+(e.g. standings recalc when an `sp_event` result is saved).
+
+| Layer | Reads | Writes |
+|---|---|---|
+| `mlbb_*` custom tables | Direct MySQL ✅ | Direct MySQL ✅ |
+| `wp_posts` / `wp_postmeta` (SP data) | Direct MySQL ✅ | REST API (hooks must fire) |
+| SportsPress standings recalc | Direct MySQL ✅ | REST API (triggers SP hooks) |
+
 ### 3.1 `services/db.py`
 - `aiomysql` connection pool, initialized at bot startup
-- Reads DB credentials from `wp-config.php` (or `.env` override)
-- Provides `get_conn()` context manager
+- Credentials from `.env` (`DB_HOST`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`)
+- `get_conn()` async context manager — auto-commits on success, rolls back on exception
 
-### 3.2 `services/sportspress.py`
-Direct MySQL reads from SportsPress tables (faster than REST for reads).
-REST API used for writes (ensures WP hooks/cache fire correctly).
+### 3.2 `services/db_helpers.py`
+All read queries — both custom `mlbb_*` tables and WordPress core tables.
+No HTTP, no auth overhead.
 
-**Key read queries:**
-- `get_player_by_discord_id(discord_id)` — reads `wp_postmeta` where `meta_key=sp_metrics`,
-  deserializes PHP array, matches `discordid`
-- `get_team(team_id)` — `wp_posts` + `wp_postmeta`
-- `get_event(event_id)` — `wp_posts` + `wp_postmeta` (sp_teams, sp_results, sp_outcome)
-- `get_league_standings(table_id)` — reads `sp_table` meta + related events
-- `get_remaining_matchups(table_id)` — events in league where `sp_results` is empty
-- `get_player_teams(sp_player_id)` — via `mlbb_player_roster`
-- `get_player_leagues(sp_player_id)` — via roster → registrations → periods
+**WordPress post reads (direct MySQL on `wp_posts` + `wp_postmeta`):**
+- `list_posts(post_type, limit)` — generic list by post_type
+- `list_teams()` — `wp_posts WHERE post_type='sp_team'`
+- `list_players()` — `wp_posts WHERE post_type='sp_player'`
+- `list_tables()` — `wp_posts WHERE post_type='sp_table'`
+- `list_tournaments()` — `wp_posts WHERE post_type='sp_tournament'`
+- `list_events()` — `wp_posts WHERE post_type='sp_event'`
+- `get_player_by_discord_id(discord_id)` — scans `sp_metrics` postmeta, deserialises PHP array
 
-**Key write operations (via WP REST API):**
-- Create `sp_team`, `sp_player`, `sp_event`, `sp_tournament`, `sp_table`
-- Update `sp_event` with result after match confirmation
-- Update `sp_player` metrics (discord linkage) on registration
-- Publish team roster page (shortcode-based) after season assignment
+**Roster / registration reads (direct MySQL on `mlbb_*`):**
+- `get_roster(sp_team_id)` — active players on a team
+- `get_captain_team(discord_id)` — team where this user is captain
+- `get_player_roster_entry(discord_id)` — any active roster row for this user
+- `get_pending_invite / get_any_pending_invite` — invite lookups
+
+### 3.3 `services/sportspress.py`
+**Write-only** — REST API calls to `https://play.mlbb.site/wp-json/sportspress/v2/`.
+Every write here triggers WordPress `save_post` / `updated_post_meta` hooks,
+which SportsPress relies on for standings recalculation and cache invalidation.
+
+**Writes:**
+- `create_team(name)` → `POST sportspress/v2/teams`
+- `create_player(name, team_ids)` → `POST sportspress/v2/players`
+- `create_event(name, home, away, date)` → `POST sportspress/v2/events`
+- `create_tournament(name)` → `POST sportspress/v2/tournaments`
+- `create_table(name)` → `POST sportspress/v2/tables`
+- `set_player_discord(player_id, discord_id, username)` → writes `sp_metrics` postmeta
+- `delete_*` variants for each post type
 
 ### 3.3 `services/match_parser.py`
 AI screenshot parsing using **Claude claude-haiku-4-5** (vision, cost-efficient).

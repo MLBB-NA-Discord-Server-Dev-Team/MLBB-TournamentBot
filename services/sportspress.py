@@ -8,7 +8,7 @@ wp/v2 is still used for media uploads and generic post meta writes.
 """
 import logging
 import base64
-from typing import Optional, List, Dict, Any
+from typing import List, Dict, Any
 import aiohttp
 
 logger = logging.getLogger(__name__)
@@ -60,9 +60,6 @@ class SportsPressAPI:
 
     # ── Teams ──────────────────────────────────────────────────────────────
 
-    async def list_teams(self) -> List[Dict]:
-        return await self._get("teams", {"per_page": 100, "status": "publish"})
-
     async def create_team(self, name: str, description: str = "") -> Dict:
         return await self._post("teams", {
             "title": name,
@@ -75,12 +72,6 @@ class SportsPressAPI:
 
     # ── Players ────────────────────────────────────────────────────────────
 
-    async def list_players(self, team_id: Optional[int] = None) -> List[Dict]:
-        params: Dict = {"per_page": 100, "status": "publish"}
-        if team_id:
-            params["teams"] = team_id
-        return await self._get("players", params)
-
     async def create_player(self, name: str, team_ids: List[int], description: str = "") -> Dict:
         data: Dict = {"title": name, "content": description, "status": "publish"}
         if team_ids:
@@ -91,9 +82,6 @@ class SportsPressAPI:
         return await self._delete(f"players/{post_id}")
 
     # ── Tournaments ────────────────────────────────────────────────────────
-
-    async def list_tournaments(self) -> List[Dict]:
-        return await self._get("tournaments", {"per_page": 100, "status": "publish"})
 
     async def create_tournament(self, name: str, description: str = "") -> Dict:
         return await self._post("tournaments", {
@@ -107,9 +95,6 @@ class SportsPressAPI:
 
     # ── Tables (League standings) ──────────────────────────────────────────
 
-    async def list_tables(self) -> List[Dict]:
-        return await self._get("tables", {"per_page": 100, "status": "publish"})
-
     async def create_table(self, name: str, description: str = "") -> Dict:
         return await self._post("tables", {
             "title": name,
@@ -121,11 +106,6 @@ class SportsPressAPI:
         return await self._delete(f"tables/{post_id}")
 
     # ── Events (Matches) ───────────────────────────────────────────────────
-
-    async def list_events(self) -> List[Dict]:
-        return await self._get("events", {
-            "per_page": 100, "status": "publish", "orderby": "date", "order": "desc"
-        })
 
     async def create_event(
         self, name: str, home_team: int, away_team: int, date: str, description: str = ""
