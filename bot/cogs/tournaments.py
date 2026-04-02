@@ -229,6 +229,7 @@ class Tournaments(commands.Cog):
                 "`/team invite [@user]` — Invite a player *(captain only)*\n"
                 "`/team accept` — Accept a pending team invite\n"
                 "`/team kick [@user]` — Remove a player *(captain only)*\n"
+                "`/team delete` — Disband your team *(captain or admin)*\n"
                 "`/team roster [team_id]` — View a team's roster\n"
                 "`/team list` — List all teams"
             ),
@@ -260,8 +261,8 @@ class Tournaments(commands.Cog):
             name="🏆 Tournament",
             value=(
                 "`/tournament list` — List all tournaments\n"
+                "`/tournament register [tournament_id]` — Sign your team up *(captain only)*\n"
                 "`/tournament create [name]` — Create a tournament 🔒\n"
-                "`/tournament info [name]` — Tournament details\n"
                 "`/tournament help` — Show this message"
             ),
             inline=False,
@@ -271,6 +272,7 @@ class Tournaments(commands.Cog):
             name="📊 League",
             value=(
                 "`/league list` — List all leagues\n"
+                "`/league register [league_id]` — Sign your team up *(captain only)*\n"
                 "`/league standings [name]` — View standings\n"
                 "`/league create [name]` — Create a league 🔒"
             ),
@@ -281,6 +283,11 @@ class Tournaments(commands.Cog):
             embed.add_field(
                 name="🔒 Admin",
                 value=(
+                    "`/admin set-season` — Configure season dates + auto-schedule registration\n"
+                    "`/admin open-registration` — Manually open a registration window\n"
+                    "`/admin close-registration` — Close a registration window\n"
+                    "`/admin registrations` — List team sign-ups\n"
+                    "`/admin approve-registration [#id]` — Approve a team sign-up\n"
                     "`/admin pending` — List pending match submissions\n"
                     "`/admin resolve-dispute [#id] [winner_team_id]` — Override a disputed result\n"
                     "`/tournament create/delete` — Manage tournament posts\n"

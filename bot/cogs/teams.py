@@ -364,6 +364,92 @@ class Teams(commands.Cog):
         embed.set_footer(text=f"Team ID: {team_id} · {config.WP_URL}/?p={team_id}")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
+    # ── /team delete ──────────────────────────────────────────────────────
+
+    @team.command(name="delete", description="Delete a team (captain: own team; admin: any team by ID)")
+    @app_commands.describe(team_id="Team post ID — admins only, leave blank to delete your own team")
+    async def team_delete(self, interaction: discord.Interaction, team_id: int = None):
+        await interaction.response.defer(ephemeral=True)
+        discord_id = str(interaction.user.id)
+        is_admin = config.has_admin_role([r.name for r in interaction.user.roles])
+
+        if team_id is not None and not is_admin:
+            await interaction.followup.send(
+                "❌ Only admins can delete a team by ID. "
+                "Captains can only delete their own team (omit `team_id`).",
+                ephemeral=True,
+            )
+            return
+
+        if team_id is None:
+            captain = await get_captain_team(discord_id)
+            if not captain:
+                await interaction.followup.send(
+                    "❌ You are not a captain of any team.", ephemeral=True
+                )
+                return
+            team_id = captain["sp_team_id"]
+            team_name = captain["team_name"]
+        else:
+            from services.db_helpers import get_team_by_id
+            team = await get_team_by_id(team_id)
+            if not team:
+                await interaction.followup.send(
+                    f"❌ No team found with ID `{team_id}`.", ephemeral=True
+                )
+                return
+            team_name = team["title"]
+
+        # Fetch all active players so we can clear their SP team links
+        roster = await get_roster(team_id)
+
+        # Clear sp_team on all players in SportsPress
+        api = get_api()
+        for member in roster:
+            try:
+                await api.set_player_teams(member["sp_player_id"], [])
+            except Exception as e:
+                logger.warning("Could not clear sp_team on player %s: %s", member["sp_player_id"], e)
+
+        # Clean up custom tables
+        async with db.get_conn() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE mlbb_player_roster SET status='inactive' WHERE sp_team_id=%s",
+                    (team_id,),
+                )
+                await cur.execute(
+                    "UPDATE mlbb_team_invites SET status='expired' WHERE sp_team_id=%s AND status='pending'",
+                    (team_id,),
+                )
+                await cur.execute(
+                    """
+                    UPDATE mlbb_team_registrations SET status='rejected'
+                    WHERE sp_team_id=%s AND status='pending'
+                    """,
+                    (team_id,),
+                )
+
+        # Delete the SportsPress team post via REST API
+        try:
+            await api.delete_team(team_id)
+        except Exception as e:
+            await interaction.followup.send(
+                f"⚠️ Roster cleaned up but failed to delete SP post: {e}", ephemeral=True
+            )
+            return
+
+        await interaction.followup.send(
+            f"✅ Team **{team_name}** (`{team_id}`) has been deleted.", ephemeral=True
+        )
+
+        await admin_log.log(self.bot, Event.SYSTEM, user=interaction.user, fields={
+            "Action": "Team deleted",
+            "Team": team_name,
+            "Team ID": team_id,
+            "Deleted by": f"<@{discord_id}>",
+        })
+
     # ── /team list ────────────────────────────────────────────────────────
 
     @team.command(name="list", description="List all teams")

@@ -11,6 +11,7 @@ from discord.ext import commands
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 from services import db
+from services.scheduler import Scheduler
 
 logging.basicConfig(
     level=getattr(logging, config.LOG_LEVEL),
@@ -60,6 +61,8 @@ class TournamentBot(commands.Bot):
         await self._bootstrap_notifications_channel()
         await self._bootstrap_admin_log_channel()
         await self._bootstrap_bot_commands_channel()
+        self._scheduler = Scheduler(self)
+        logger.info("Scheduler started")
 
     async def _bootstrap_notifications_channel(self):
         """

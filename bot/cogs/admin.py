@@ -335,5 +335,131 @@ class Admin(commands.Cog):
         )
 
 
+    @admin.command(name="set-season", description="Define season dates and auto-schedule registration for leagues/tournaments")
+    @app_commands.describe(
+        season_name="Display name for this season (e.g. 'Season 3')",
+        sp_season_id="SportsPress season term ID",
+        reg_opens="Registration opens date (YYYY-MM-DD)",
+        reg_closes="Registration closes date (YYYY-MM-DD)",
+        play_start="Season play start date (YYYY-MM-DD)",
+        play_end="Season play end date (YYYY-MM-DD)",
+        league_ids="Comma-separated league IDs to auto-schedule (e.g. 12,34,56)",
+        tournament_ids="Comma-separated tournament IDs to auto-schedule (optional)",
+        max_teams="Team cap per registration period (leave blank for unlimited)",
+    )
+    @admin_check()
+    async def set_season(
+        self,
+        interaction: discord.Interaction,
+        season_name: str,
+        sp_season_id: int,
+        reg_opens: str,
+        reg_closes: str,
+        play_start: str,
+        play_end: str,
+        league_ids: str = "",
+        tournament_ids: str = "",
+        max_teams: int = None,
+    ):
+        await interaction.response.defer(ephemeral=True)
+
+        from datetime import date as _date
+
+        # Validate dates
+        try:
+            _date.fromisoformat(reg_opens)
+            _date.fromisoformat(reg_closes)
+            _date.fromisoformat(play_start)
+            _date.fromisoformat(play_end)
+        except ValueError as e:
+            await interaction.followup.send(f"❌ Invalid date format: {e}", ephemeral=True)
+            return
+
+        # Parse entity ID lists
+        def _parse_ids(raw: str) -> list[int]:
+            return [int(x.strip()) for x in raw.split(",") if x.strip().isdigit()]
+
+        leagues = _parse_ids(league_ids)
+        tournaments = _parse_ids(tournament_ids)
+
+        if not leagues and not tournaments:
+            await interaction.followup.send(
+                "❌ Provide at least one league_id or tournament_id.", ephemeral=True
+            )
+            return
+
+        async with db.get_conn() as conn:
+            async with conn.cursor() as cur:
+                # Upsert season schedule
+                await cur.execute(
+                    """
+                    INSERT INTO mlbb_season_schedule
+                        (sp_season_id, season_name, play_start, play_end, reg_opens, reg_closes)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                        season_name=%s, play_start=%s, play_end=%s,
+                        reg_opens=%s, reg_closes=%s
+                    """,
+                    (
+                        sp_season_id, season_name, play_start, play_end, reg_opens, reg_closes,
+                        season_name, play_start, play_end, reg_opens, reg_closes,
+                    ),
+                )
+
+                # Create scheduled registration periods for each entity
+                created = 0
+                skipped = 0
+                for entity_type, ids in [("league", leagues), ("tournament", tournaments)]:
+                    for eid in ids:
+                        # Skip if an open/scheduled period already exists
+                        await cur.execute(
+                            """
+                            SELECT id FROM mlbb_registration_periods
+                            WHERE entity_type=%s AND entity_id=%s AND status IN ('scheduled','open')
+                            """,
+                            (entity_type, eid),
+                        )
+                        if await cur.fetchone():
+                            skipped += 1
+                            continue
+
+                        await cur.execute(
+                            """
+                            INSERT INTO mlbb_registration_periods
+                                (entity_type, entity_id, sp_season_id, opens_at, closes_at,
+                                 max_teams, created_by, status)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, 'scheduled')
+                            """,
+                            (
+                                entity_type, eid, sp_season_id,
+                                reg_opens, reg_closes,
+                                max_teams, str(interaction.user.id),
+                            ),
+                        )
+                        created += 1
+
+        embed = discord.Embed(
+            title=f"📅 Season Configured — {season_name}",
+            color=0x2ECC71,
+        )
+        embed.add_field(name="Season ID", value=sp_season_id)
+        embed.add_field(name="Registration", value=f"{reg_opens} → {reg_closes}")
+        embed.add_field(name="Play window", value=f"{play_start} → {play_end}")
+        embed.add_field(name="Leagues", value=", ".join(map(str, leagues)) or "—")
+        embed.add_field(name="Tournaments", value=", ".join(map(str, tournaments)) or "—")
+        embed.add_field(name="Periods created", value=f"{created} scheduled, {skipped} skipped (already active)")
+        embed.add_field(name="Max teams", value=str(max_teams) if max_teams else "Unlimited")
+        embed.set_footer(text="Registration will open automatically on the opens date.")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+        await admin_log.log(self.bot, Event.SYSTEM, user=interaction.user, fields={
+            "Action": "Season configured",
+            "Season": f"{season_name} (ID {sp_season_id})",
+            "Registration": f"{reg_opens} → {reg_closes}",
+            "Entities": f"{len(leagues)} leagues, {len(tournaments)} tournaments",
+            "Periods created": created,
+        })
+
+
 async def setup(bot: commands.Bot):
     await bot.add_cog(Admin(bot))
