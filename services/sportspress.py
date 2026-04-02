@@ -54,7 +54,7 @@ class SportsPressAPI:
     async def _delete(self, endpoint: str, base: str = None) -> Any:
         url = f"{base or self.sp_url}/{endpoint}"
         async with aiohttp.ClientSession() as session:
-            async with session.delete(url, headers=self.headers, params={"force": True}) as r:
+            async with session.delete(url, headers=self.headers, params={"force": "true"}) as r:
                 r.raise_for_status()
                 return await r.json()
 
