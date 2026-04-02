@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 import config
 from services import db, admin_log
 from services.admin_log import Event
+from services.db_helpers import list_tables, list_tournaments
 
 
 def admin_check():
@@ -137,6 +138,201 @@ class Admin(commands.Cog):
             color=0xF59E0B,
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+    @admin.command(name="open-registration", description="Open registration for a league or tournament")
+    @app_commands.describe(
+        entity_type="league or tournament",
+        entity_id="The post ID (use /league list or /tournament list)",
+        closes_in_days="How many days until registration closes (default 7)",
+        max_teams="Maximum teams allowed (leave blank for unlimited)",
+    )
+    @app_commands.choices(entity_type=[
+        app_commands.Choice(name="League", value="league"),
+        app_commands.Choice(name="Tournament", value="tournament"),
+    ])
+    @admin_check()
+    async def open_registration(
+        self,
+        interaction: discord.Interaction,
+        entity_type: str,
+        entity_id: int,
+        closes_in_days: int = 7,
+        max_teams: int = None,
+    ):
+        await interaction.response.defer(ephemeral=True)
+
+        # Verify entity exists
+        if entity_type == "league":
+            items = await list_tables()
+        else:
+            items = await list_tournaments()
+
+        entity = next((i for i in items if i["id"] == entity_id), None)
+        if not entity:
+            await interaction.followup.send(
+                f"❌ No {entity_type} found with ID `{entity_id}`.", ephemeral=True
+            )
+            return
+
+        async with db.get_conn() as conn:
+            async with conn.cursor() as cur:
+                # Close any existing open period for this entity
+                await cur.execute(
+                    """
+                    UPDATE mlbb_registration_periods
+                    SET status='closed'
+                    WHERE entity_type=%s AND entity_id=%s AND status='open'
+                    """,
+                    (entity_type, entity_id),
+                )
+                await cur.execute(
+                    """
+                    INSERT INTO mlbb_registration_periods
+                        (entity_type, entity_id, opens_at, closes_at, max_teams, created_by, status)
+                    VALUES (%s, %s, NOW(), DATE_ADD(NOW(), INTERVAL %s DAY), %s, %s, 'open')
+                    """,
+                    (entity_type, entity_id, closes_in_days, max_teams, str(interaction.user.id)),
+                )
+                period_id = cur.lastrowid
+
+        cap_text = str(max_teams) if max_teams else "Unlimited"
+        embed = discord.Embed(
+            title=f"✅ Registration Opened — {entity['title']}",
+            color=0x2ECC71,
+        )
+        embed.add_field(name="Type", value=entity_type.capitalize())
+        embed.add_field(name="Entity ID", value=entity_id)
+        embed.add_field(name="Period ID", value=period_id)
+        embed.add_field(name="Closes in", value=f"{closes_in_days} days")
+        embed.add_field(name="Max teams", value=cap_text)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+        await admin_log.log(self.bot, Event.SYSTEM, user=interaction.user, fields={
+            "Action": "Registration opened",
+            "Entity": f"{entity_type.capitalize()} #{entity_id} — {entity['title']}",
+            "Closes in": f"{closes_in_days} days",
+            "Max teams": cap_text,
+        })
+
+    @admin.command(name="close-registration", description="Close registration for a league or tournament")
+    @app_commands.describe(
+        entity_type="league or tournament",
+        entity_id="The post ID",
+    )
+    @app_commands.choices(entity_type=[
+        app_commands.Choice(name="League", value="league"),
+        app_commands.Choice(name="Tournament", value="tournament"),
+    ])
+    @admin_check()
+    async def close_registration(
+        self,
+        interaction: discord.Interaction,
+        entity_type: str,
+        entity_id: int,
+    ):
+        await interaction.response.defer(ephemeral=True)
+
+        async with db.get_conn() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    UPDATE mlbb_registration_periods
+                    SET status='closed'
+                    WHERE entity_type=%s AND entity_id=%s AND status='open'
+                    """,
+                    (entity_type, entity_id),
+                )
+                affected = cur.rowcount
+
+        if not affected:
+            await interaction.followup.send(
+                f"❌ No open registration period found for {entity_type} `{entity_id}`.", ephemeral=True
+            )
+            return
+
+        await interaction.followup.send(
+            f"✅ Registration closed for {entity_type} `{entity_id}`.", ephemeral=True
+        )
+
+    @admin.command(name="registrations", description="List team registrations for a league or tournament")
+    @app_commands.describe(
+        entity_type="league or tournament",
+        entity_id="The post ID",
+    )
+    @app_commands.choices(entity_type=[
+        app_commands.Choice(name="League", value="league"),
+        app_commands.Choice(name="Tournament", value="tournament"),
+    ])
+    @admin_check()
+    async def registrations(
+        self,
+        interaction: discord.Interaction,
+        entity_type: str,
+        entity_id: int,
+    ):
+        await interaction.response.defer(ephemeral=True)
+
+        async with db.get_conn() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    SELECT tr.id, tr.sp_team_id, tp.post_title, tr.registered_by, tr.status, tr.registered_at
+                    FROM mlbb_team_registrations tr
+                    JOIN mlbb_registration_periods rp ON rp.id = tr.period_id
+                    JOIN wp_posts tp ON tp.ID = tr.sp_team_id
+                    WHERE rp.entity_type=%s AND rp.entity_id=%s
+                    ORDER BY tr.registered_at ASC
+                    """,
+                    (entity_type, entity_id),
+                )
+                rows = await cur.fetchall()
+
+        if not rows:
+            await interaction.followup.send(
+                f"No registrations found for {entity_type} `{entity_id}`.", ephemeral=True
+            )
+            return
+
+        status_icons = {"pending": "🕐", "approved": "✅", "rejected": "❌"}
+        lines = [
+            f"{status_icons.get(r[4], '•')} `#{r[0]}` **{r[2]}** (Team `{r[1]}`) — <@{r[3]}> — {r[4]}"
+            for r in rows
+        ]
+        embed = discord.Embed(
+            title=f"Registrations — {entity_type.capitalize()} {entity_id} ({len(rows)})",
+            description="\n".join(lines),
+            color=0xF59E0B,
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @admin.command(name="approve-registration", description="Approve a team registration")
+    @app_commands.describe(registration_id="Registration ID from /admin registrations")
+    @admin_check()
+    async def approve_registration(self, interaction: discord.Interaction, registration_id: int):
+        await interaction.response.defer(ephemeral=True)
+
+        async with db.get_conn() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    UPDATE mlbb_team_registrations
+                    SET status='approved', reviewed_by=%s, reviewed_at=NOW()
+                    WHERE id=%s AND status='pending'
+                    """,
+                    (str(interaction.user.id), registration_id),
+                )
+                affected = cur.rowcount
+
+        if not affected:
+            await interaction.followup.send(
+                f"❌ Registration `#{registration_id}` not found or not pending.", ephemeral=True
+            )
+            return
+
+        await interaction.followup.send(
+            f"✅ Registration `#{registration_id}` approved.", ephemeral=True
+        )
 
 
 async def setup(bot: commands.Bot):

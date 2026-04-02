@@ -10,6 +10,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 import config
 from services.sportspress import SportsPressAPI
 from services.db_helpers import list_tournaments as db_list_tournaments
+from services import db
+from services.db_helpers import get_captain_team
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +118,90 @@ class Tournaments(commands.Cog):
         embed.add_field(name="URL", value=event.get('link', ''), inline=False)
         await interaction.followup.send(embed=embed, ephemeral=True)
 
+
+    @tournament.command(name="register", description="Register your team for a tournament")
+    @app_commands.describe(tournament_id="Tournament post ID (use /tournament list to find it)")
+    async def tournament_register(self, interaction: discord.Interaction, tournament_id: int):
+        await interaction.response.defer(ephemeral=True)
+        discord_id = str(interaction.user.id)
+
+        captain = await get_captain_team(discord_id)
+        if not captain:
+            await interaction.followup.send(
+                "❌ Only team captains can register a team. "
+                "Create a team first with `/team create`.", ephemeral=True
+            )
+            return
+
+        async with db.get_conn() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    SELECT id, max_teams
+                    FROM mlbb_registration_periods
+                    WHERE entity_type='tournament'
+                      AND entity_id=%s
+                      AND status='open'
+                      AND opens_at <= NOW()
+                      AND closes_at > NOW()
+                    LIMIT 1
+                    """,
+                    (tournament_id,),
+                )
+                period = await cur.fetchone()
+
+        if not period:
+            await interaction.followup.send(
+                f"❌ Registration is not currently open for tournament `{tournament_id}`.\n"
+                "Ask an organizer to open registrations with `/admin open-registration`.",
+                ephemeral=True,
+            )
+            return
+
+        period_id, max_teams = period
+
+        async with db.get_conn() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT id FROM mlbb_team_registrations WHERE period_id=%s AND sp_team_id=%s",
+                    (period_id, captain["sp_team_id"]),
+                )
+                if await cur.fetchone():
+                    await interaction.followup.send(
+                        f"❌ **{captain['team_name']}** is already registered for this tournament.",
+                        ephemeral=True,
+                    )
+                    return
+
+                if max_teams:
+                    await cur.execute(
+                        "SELECT COUNT(*) FROM mlbb_team_registrations WHERE period_id=%s AND status!='rejected'",
+                        (period_id,),
+                    )
+                    count = (await cur.fetchone())[0]
+                    if count >= max_teams:
+                        await interaction.followup.send(
+                            f"❌ This tournament is full ({max_teams} teams). Contact an organizer.",
+                            ephemeral=True,
+                        )
+                        return
+
+                await cur.execute(
+                    """
+                    INSERT INTO mlbb_team_registrations
+                        (period_id, sp_team_id, registered_by, status)
+                    VALUES (%s, %s, %s, 'pending')
+                    """,
+                    (period_id, captain["sp_team_id"], discord_id),
+                )
+
+        embed = discord.Embed(
+            title="📋 Registration Submitted",
+            description=f"**{captain['team_name']}** has been registered for tournament `{tournament_id}`.",
+            color=0x9D4EDD,
+        )
+        embed.set_footer(text="An organizer will review and approve your registration.")
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     @tournament.command(name="help", description="List all available bot commands")
     async def tournament_help(self, interaction: discord.Interaction):

@@ -10,6 +10,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 import config
 from services.sportspress import SportsPressAPI
 from services.db_helpers import list_tables
+from services import db
+from services.db_helpers import get_captain_team
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +84,93 @@ class Leagues(commands.Cog):
             await interaction.followup.send(f"❌ Failed to delete: {e}", ephemeral=True)
             return
         await interaction.followup.send(f"✅ League `{league_id}` deleted.", ephemeral=True)
+
+    @league.command(name="register", description="Register your team for a league")
+    @app_commands.describe(league_id="League post ID (use /league list to find it)")
+    async def league_register(self, interaction: discord.Interaction, league_id: int):
+        await interaction.response.defer(ephemeral=True)
+        discord_id = str(interaction.user.id)
+
+        captain = await get_captain_team(discord_id)
+        if not captain:
+            await interaction.followup.send(
+                "❌ Only team captains can register a team. "
+                "Create a team first with `/team create`.", ephemeral=True
+            )
+            return
+
+        async with db.get_conn() as conn:
+            async with conn.cursor() as cur:
+                # Find an open registration period for this league
+                await cur.execute(
+                    """
+                    SELECT id, max_teams
+                    FROM mlbb_registration_periods
+                    WHERE entity_type='league'
+                      AND entity_id=%s
+                      AND status='open'
+                      AND opens_at <= NOW()
+                      AND closes_at > NOW()
+                    LIMIT 1
+                    """,
+                    (league_id,),
+                )
+                period = await cur.fetchone()
+
+        if not period:
+            await interaction.followup.send(
+                f"❌ Registration is not currently open for league `{league_id}`.\n"
+                "Ask an organizer to open registrations with `/admin open-registration`.",
+                ephemeral=True,
+            )
+            return
+
+        period_id, max_teams = period
+
+        async with db.get_conn() as conn:
+            async with conn.cursor() as cur:
+                # Check already registered
+                await cur.execute(
+                    "SELECT id FROM mlbb_team_registrations WHERE period_id=%s AND sp_team_id=%s",
+                    (period_id, captain["sp_team_id"]),
+                )
+                if await cur.fetchone():
+                    await interaction.followup.send(
+                        f"❌ **{captain['team_name']}** is already registered for this league.",
+                        ephemeral=True,
+                    )
+                    return
+
+                # Enforce max_teams cap
+                if max_teams:
+                    await cur.execute(
+                        "SELECT COUNT(*) FROM mlbb_team_registrations WHERE period_id=%s AND status!='rejected'",
+                        (period_id,),
+                    )
+                    count = (await cur.fetchone())[0]
+                    if count >= max_teams:
+                        await interaction.followup.send(
+                            f"❌ This league is full ({max_teams} teams). Contact an organizer.",
+                            ephemeral=True,
+                        )
+                        return
+
+                await cur.execute(
+                    """
+                    INSERT INTO mlbb_team_registrations
+                        (period_id, sp_team_id, registered_by, status)
+                    VALUES (%s, %s, %s, 'pending')
+                    """,
+                    (period_id, captain["sp_team_id"], discord_id),
+                )
+
+        embed = discord.Embed(
+            title="📋 Registration Submitted",
+            description=f"**{captain['team_name']}** has been registered for league `{league_id}`.",
+            color=0x3A86FF,
+        )
+        embed.set_footer(text="An organizer will review and approve your registration.")
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 async def setup(bot: commands.Bot):

@@ -87,6 +87,12 @@ class Teams(commands.Cog):
                     (discord_id, player["id"], sp_team_id),
                 )
 
+        # Link captain to team in SportsPress so they appear on the team page
+        try:
+            await api.set_player_teams(player["id"], [sp_team_id])
+        except Exception as e:
+            logger.warning("Could not sync sp_team on captain %s: %s", player["id"], e)
+
         embed = discord.Embed(title="✅ Team Created", color=0x2ECC71)
         embed.add_field(name="Team", value=name)
         embed.add_field(name="Team ID", value=sp_team_id)
@@ -229,6 +235,12 @@ class Teams(commands.Cog):
                     (invite["id"],),
                 )
 
+        # Sync team association to SportsPress so the player appears on the team page roster
+        try:
+            await get_api().set_player_teams(player["id"], [invite["sp_team_id"]])
+        except Exception as e:
+            logger.warning("Could not sync sp_team on player %s: %s", player["id"], e)
+
         embed = discord.Embed(
             title=f"✅ Joined {invite['team_name']}",
             description=f"You are now a **{invite['role']}** on **{invite['team_name']}**.",
@@ -281,6 +293,14 @@ class Teams(commands.Cog):
                 ephemeral=True,
             )
             return
+
+        # Remove team from SportsPress player record (keep them as a player, just no team)
+        kicked_player = await get_player_by_discord_id(target_id)
+        if kicked_player:
+            try:
+                await get_api().set_player_teams(kicked_player["id"], [])
+            except Exception as e:
+                logger.warning("Could not clear sp_team on player %s: %s", kicked_player["id"], e)
 
         try:
             await user.send(

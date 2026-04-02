@@ -133,3 +133,7 @@ class SportsPressAPI:
         }
         serialised = phpserialize.dumps(metrics).decode()
         return await self._post(f"players/{player_id}", {"meta": {"sp_metrics": serialised}})
+
+    async def set_player_teams(self, player_id: int, team_ids: List[int]) -> Dict:
+        """Update the sp_team association on an sp_player post (shows player on team page roster)."""
+        return await self._post(f"players/{player_id}", {"teams": team_ids})
