@@ -74,6 +74,18 @@ class SportsPressAPI:
         """Set the featured image (logo) on an sp_team post."""
         return await self._post(f"teams/{team_id}", {"featured_media": media_id})
 
+    async def create_player_list(self, title: str) -> Dict:
+        """
+        Create an sp_list post (Player List) via the SportsPress REST API.
+        After creation, call db_helpers.setup_team_roster_display() to set
+        sp_team postmeta and wire ACF fields on the team post.
+        """
+        return await self._post("lists", {
+            "title": title,
+            "status": "publish",
+            "format": "list",
+        })
+
     async def upload_media(self, image_bytes: bytes, filename: str, mime_type: str) -> Dict:
         """Upload raw image bytes to the WP media library. Returns the media post dict."""
         url = f"{self.wp_url}/media"

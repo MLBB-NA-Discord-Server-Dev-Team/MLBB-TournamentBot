@@ -209,6 +209,60 @@ _ACF_COLOR_PRIMARY   = "field_5d5d65131416b"
 _ACF_COLOR_SECONDARY = "field_5d5d729675d1b"
 
 
+async def setup_team_roster_display(sp_team_id: int, sp_list_id: int) -> None:
+    """
+    Wire a newly created sp_list to its team so the Alchemists roster tab renders.
+
+    Two things must happen:
+      1. Set sp_team postmeta on the sp_list post → SP_Player_List filters by this team.
+      2. Set 4 ACF fields on the sp_team post → content-roster.php uses them to find
+         and render the list.
+
+    ACF field keys (from alchemists/inc/acf-fields.php):
+      gallery_roster_show  field_58fca7bbfbeb5  (bool 1)
+      gallery_roster       field_58fca8b1aadab  (int: list ID)
+      list_roster_show     field_58fcafde0456f  (bool 1)
+      list_roster          field_58fcb01004570  (serialised array of list IDs)
+    """
+    async with db.get_conn() as conn:
+        async with conn.cursor() as cur:
+            # 1. Point sp_list → team (SP_Player_List uses this to filter players)
+            await cur.execute(
+                """
+                INSERT INTO wp_postmeta (post_id, meta_key, meta_value)
+                VALUES (%s, 'sp_team', %s)
+                ON DUPLICATE KEY UPDATE meta_value = VALUES(meta_value)
+                """,
+                (sp_list_id, sp_team_id),
+            )
+
+            # 2. ACF fields on the team post
+            acf_pairs = [
+                ("gallery_roster_show", "_gallery_roster_show", "1",               "field_58fca7bbfbeb5"),
+                ("gallery_roster",      "_gallery_roster",      sp_list_id,         "field_58fca8b1aadab"),
+                ("list_roster_show",    "_list_roster_show",    "1",                "field_58fcafde0456f"),
+                # ACF stores multiple post_object as PHP serialised array
+                ("list_roster",         "_list_roster",         f'a:1:{{i:0;i:{sp_list_id};}}', "field_58fcb01004570"),
+            ]
+            for value_key, ref_key, value, acf_key in acf_pairs:
+                await cur.execute(
+                    """
+                    INSERT INTO wp_postmeta (post_id, meta_key, meta_value)
+                    VALUES (%s, %s, %s)
+                    ON DUPLICATE KEY UPDATE meta_value = VALUES(meta_value)
+                    """,
+                    (sp_team_id, value_key, value),
+                )
+                await cur.execute(
+                    """
+                    INSERT INTO wp_postmeta (post_id, meta_key, meta_value)
+                    VALUES (%s, %s, %s)
+                    ON DUPLICATE KEY UPDATE meta_value = VALUES(meta_value)
+                    """,
+                    (sp_team_id, ref_key, acf_key),
+                )
+
+
 async def set_team_colors(
     sp_team_id: int,
     color_primary: Optional[str] = None,

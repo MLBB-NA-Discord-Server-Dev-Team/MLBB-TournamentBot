@@ -28,6 +28,7 @@ from services.db_helpers import (
     get_any_pending_invite,
     list_teams,
     set_team_colors,
+    setup_team_roster_display,
 )
 from services.sportspress import SportsPressAPI
 
@@ -93,6 +94,14 @@ class Teams(commands.Cog):
             await api.set_player_teams(player["id"], [sp_team_id])
         except Exception as e:
             logger.warning("Could not sync sp_team on captain %s: %s", player["id"], e)
+
+        # Create an sp_list for this team and wire ACF roster fields so the
+        # Roster tab on the team page displays players correctly
+        try:
+            sp_list = await api.create_player_list(f"{name} — Roster")
+            await setup_team_roster_display(sp_team_id, sp_list["id"])
+        except Exception as e:
+            logger.warning("Could not create roster list for team %s: %s", sp_team_id, e)
 
         embed = discord.Embed(title="✅ Team Created", color=0x2ECC71)
         embed.add_field(name="Team", value=name)
