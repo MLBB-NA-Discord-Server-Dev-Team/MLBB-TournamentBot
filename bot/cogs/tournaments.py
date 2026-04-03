@@ -229,6 +229,7 @@ class Tournaments(commands.Cog):
                 "`/team invite [@user]` — Invite a player *(captain only)*\n"
                 "`/team accept` — Accept a pending team invite\n"
                 "`/team kick [@user]` — Remove a player *(captain only)*\n"
+                "`/team edit` — Set team logo and/or colors *(captain only)*\n"
                 "`/team delete` — Disband your team *(captain or admin)*\n"
                 "`/team roster [team_id]` — View a team's roster\n"
                 "`/team list` — List all teams"

@@ -27,6 +27,7 @@ from services.db_helpers import (
     get_roster,
     get_any_pending_invite,
     list_teams,
+    set_team_colors,
 )
 from services.sportspress import SportsPressAPI
 
@@ -363,6 +364,127 @@ class Teams(commands.Cog):
         )
         embed.set_footer(text=f"Team ID: {team_id} · {config.WP_URL}/?p={team_id}")
         await interaction.followup.send(embed=embed, ephemeral=True)
+
+    # ── /team edit ────────────────────────────────────────────────────────
+
+    @team.command(name="edit", description="Update your team's logo and/or colors (captain only)")
+    @app_commands.describe(
+        picture="Team logo image (PNG/JPG)",
+        color1="Primary color as hex code (e.g. #FF0000)",
+        color2="Secondary color as hex code (e.g. #0000FF)",
+    )
+    async def team_edit(
+        self,
+        interaction: discord.Interaction,
+        picture: discord.Attachment = None,
+        color1: str = None,
+        color2: str = None,
+    ):
+        await interaction.response.defer(ephemeral=True)
+        discord_id = str(interaction.user.id)
+
+        captain = await get_captain_team(discord_id)
+        if not captain and not config.has_admin_role([r.name for r in interaction.user.roles]):
+            await interaction.followup.send(
+                "❌ Only team captains can edit team settings.", ephemeral=True
+            )
+            return
+
+        if not captain:
+            await interaction.followup.send(
+                "❌ You are not a captain of any team.", ephemeral=True
+            )
+            return
+
+        if not picture and not color1 and not color2:
+            await interaction.followup.send(
+                "Provide at least one of: `picture`, `color1`, `color2`.", ephemeral=True
+            )
+            return
+
+        # Validate and normalise hex colors
+        def normalise_color(raw: str) -> str | None:
+            raw = raw.strip().lstrip("#")
+            if len(raw) == 3:
+                raw = "".join(c * 2 for c in raw)
+            if len(raw) == 6 and all(c in "0123456789abcdefABCDEF" for c in raw):
+                return f"#{raw.upper()}"
+            return None
+
+        color1_hex = normalise_color(color1) if color1 else None
+        color2_hex = normalise_color(color2) if color2 else None
+
+        if color1 and color1_hex is None:
+            await interaction.followup.send(
+                f"❌ Invalid color1 `{color1}` — use a hex code like `#FF0000`.", ephemeral=True
+            )
+            return
+        if color2 and color2_hex is None:
+            await interaction.followup.send(
+                f"❌ Invalid color2 `{color2}` — use a hex code like `#0000FF`.", ephemeral=True
+            )
+            return
+
+        api = get_api()
+        results = []
+
+        # ── Upload picture ─────────────────────────────────────────────────
+        if picture:
+            allowed_types = {"image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp"}
+            mime = picture.content_type or "image/png"
+            if mime not in allowed_types:
+                await interaction.followup.send(
+                    f"❌ Unsupported file type `{mime}`. Use PNG, JPG, GIF, or WebP.", ephemeral=True
+                )
+                return
+
+            try:
+                image_bytes = await picture.read()
+            except Exception as e:
+                await interaction.followup.send(f"❌ Could not read attachment: {e}", ephemeral=True)
+                return
+
+            ext = picture.filename.rsplit(".", 1)[-1].lower() if "." in picture.filename else "png"
+            safe_name = f"team-{captain['sp_team_id']}-logo.{ext}"
+
+            try:
+                media = await api.upload_media(image_bytes, safe_name, mime)
+                media_id = media["id"]
+                await api.set_team_featured_image(captain["sp_team_id"], media_id)
+                results.append(f"🖼️ Logo updated (media ID `{media_id}`)")
+            except Exception as e:
+                await interaction.followup.send(f"❌ Failed to upload logo: {e}", ephemeral=True)
+                return
+
+        # ── Set colors ─────────────────────────────────────────────────────
+        if color1_hex or color2_hex:
+            try:
+                await set_team_colors(
+                    captain["sp_team_id"],
+                    color_primary=color1_hex,
+                    color_secondary=color2_hex,
+                )
+                if color1_hex:
+                    results.append(f"🎨 Primary color set to `{color1_hex}`")
+                if color2_hex:
+                    results.append(f"🎨 Secondary color set to `{color2_hex}`")
+            except Exception as e:
+                await interaction.followup.send(f"❌ Failed to update colors: {e}", ephemeral=True)
+                return
+
+        embed = discord.Embed(
+            title=f"✅ {captain['team_name']} Updated",
+            description="\n".join(results),
+            color=discord.Color.from_str(color1_hex) if color1_hex else 0x2ECC71,
+        )
+        embed.set_footer(text=f"View team: {config.WP_URL}/team/{captain['sp_team_id']}/")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+        await admin_log.log(self.bot, Event.SYSTEM, user=interaction.user, fields={
+            "Action": "Team edited",
+            "Team": captain["team_name"],
+            "Changes": ", ".join(results),
+        })
 
     # ── /team delete ──────────────────────────────────────────────────────
 

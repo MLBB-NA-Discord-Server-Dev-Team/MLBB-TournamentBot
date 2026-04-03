@@ -202,6 +202,55 @@ async def get_any_pending_invite(invitee_discord_id: str) -> Optional[dict]:
     }
 
 
+# ── Team appearance (colors stored as ACF postmeta) ───────────────────────
+
+# ACF field keys as registered in the Alchemists theme
+_ACF_COLOR_PRIMARY   = "field_5d5d65131416b"
+_ACF_COLOR_SECONDARY = "field_5d5d729675d1b"
+
+
+async def set_team_colors(
+    sp_team_id: int,
+    color_primary: Optional[str] = None,
+    color_secondary: Optional[str] = None,
+) -> None:
+    """
+    UPSERT team_color_primary / team_color_secondary postmeta.
+    Also ensures the ACF field-reference keys (_team_color_*) exist so
+    get_field() works on bot-created posts that lack them.
+    """
+    pairs = []
+    if color_primary is not None:
+        pairs.append(("team_color_primary",   "_team_color_primary",   color_primary,   _ACF_COLOR_PRIMARY))
+    if color_secondary is not None:
+        pairs.append(("team_color_secondary", "_team_color_secondary", color_secondary, _ACF_COLOR_SECONDARY))
+
+    if not pairs:
+        return
+
+    async with db.get_conn() as conn:
+        async with conn.cursor() as cur:
+            for value_key, ref_key, value, acf_field_key in pairs:
+                # Upsert the color value
+                await cur.execute(
+                    """
+                    INSERT INTO wp_postmeta (post_id, meta_key, meta_value)
+                    VALUES (%s, %s, %s)
+                    ON DUPLICATE KEY UPDATE meta_value = VALUES(meta_value)
+                    """,
+                    (sp_team_id, value_key, value),
+                )
+                # Upsert the ACF reference key (bot-created posts won't have this yet)
+                await cur.execute(
+                    """
+                    INSERT INTO wp_postmeta (post_id, meta_key, meta_value)
+                    VALUES (%s, %s, %s)
+                    ON DUPLICATE KEY UPDATE meta_value = VALUES(meta_value)
+                    """,
+                    (sp_team_id, ref_key, acf_field_key),
+                )
+
+
 # ── SportsPress post listings (direct MySQL — no HTTP overhead) ────────────
 
 async def list_posts(post_type: str, limit: int = 100) -> list[dict]:

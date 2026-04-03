@@ -70,6 +70,23 @@ class SportsPressAPI:
     async def delete_team(self, post_id: int) -> Dict:
         return await self._delete(f"teams/{post_id}")
 
+    async def set_team_featured_image(self, team_id: int, media_id: int) -> Dict:
+        """Set the featured image (logo) on an sp_team post."""
+        return await self._post(f"teams/{team_id}", {"featured_media": media_id})
+
+    async def upload_media(self, image_bytes: bytes, filename: str, mime_type: str) -> Dict:
+        """Upload raw image bytes to the WP media library. Returns the media post dict."""
+        url = f"{self.wp_url}/media"
+        headers = {
+            "Authorization": self.headers["Authorization"],
+            "Content-Type": mime_type,
+            "Content-Disposition": f'attachment; filename="{filename}"',
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, data=image_bytes) as r:
+                r.raise_for_status()
+                return await r.json()
+
     # ── Players ────────────────────────────────────────────────────────────
 
     async def create_player(self, name: str, team_ids: List[int], description: str = "") -> Dict:
