@@ -2,6 +2,7 @@
 bot/cogs/player.py — /player register, /player profile
 """
 import logging
+import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -11,7 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 import config
 from services import db, admin_log
 from services.admin_log import Event
-from services.db_helpers import get_player_by_discord_id, get_roster
+from services.db_helpers import get_player_by_discord_id, get_roster, set_player_photos
 from services.sportspress import SportsPressAPI
 
 logger = logging.getLogger(__name__)
@@ -63,6 +64,19 @@ class Player(commands.Cog):
         except Exception as e:
             logger.warning("Could not set sp_metrics for player %s: %s", sp_player_id, e)
 
+        # Upload Discord avatar as player photo
+        try:
+            avatar_url = interaction.user.display_avatar.with_format("png").with_size(256).url
+            async with aiohttp.ClientSession() as session:
+                async with session.get(avatar_url) as resp:
+                    if resp.status == 200:
+                        avatar_bytes = await resp.read()
+                        filename = f"discord-avatar-{discord_id}.png"
+                        media = await api.upload_media(avatar_bytes, filename, "image/png")
+                        await set_player_photos(sp_player_id, media["id"])
+        except Exception as e:
+            logger.warning("Could not set avatar for player %s: %s", sp_player_id, e)
+
         embed = discord.Embed(
             title="✅ Player Registered",
             description=f"Welcome to the league, **{ign}**!",
@@ -78,7 +92,7 @@ class Player(commands.Cog):
         embed.set_footer(text="Use /team create to start a team, or ask a captain to invite you.")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-        await admin_log.log(self.bot, Event.PLAYER_REGISTERED, user=interaction.user, fields={
+        await admin_log.log(interaction.client, Event.PLAYER_REGISTERED, user=interaction.user, fields={
             "IGN": ign,
             "Player ID": sp_player_id,
             "Discord": f"<@{discord_id}>",

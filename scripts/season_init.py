@@ -147,6 +147,21 @@ def upsert_season_schedule(cur, sp_season_id: int, season: dict):
           season["reg_opens"], season["reg_closes"]))
 
 
+def get_league_rule(cur, table_id: int) -> str | None:
+    """Look up mlbb_rule termmeta for the sp_league term assigned to a given sp_table post."""
+    cur.execute("""
+        SELECT tm.meta_value
+        FROM wp_term_relationships wtr
+        JOIN wp_term_taxonomy wtt ON wtt.term_taxonomy_id = wtr.term_taxonomy_id
+                                  AND wtt.taxonomy = 'sp_league'
+        JOIN wp_termmeta tm ON tm.term_id = wtt.term_id AND tm.meta_key = 'mlbb_rule'
+        WHERE wtr.object_id = %s
+        LIMIT 1
+    """, (table_id,))
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
 def upsert_registration_period(cur, entity_id: int, sp_season_id: int, season: dict):
     """Create registration period if one doesn't already exist for this table."""
     cur.execute("""
@@ -162,24 +177,25 @@ def upsert_registration_period(cur, entity_id: int, sp_season_id: int, season: d
     opens_at  = season["reg_opens"]
     closes_at = season["reg_closes"]
 
-    # If we're bootstrapping past the reg_opens date, open immediately
     if today >= closes_at:
         status = "closed"
     elif today >= opens_at:
         status = "open"
-        opens_at = today   # open now
+        opens_at = today
     else:
         status = "scheduled"
 
+    rule = get_league_rule(cur, entity_id)
+
     cur.execute("""
         INSERT INTO mlbb_registration_periods
-            (entity_type, entity_id, sp_season_id, opens_at, closes_at, status, created_by)
-        VALUES ('league', %s, %s, %s, %s, %s, 'system')
+            (entity_type, entity_id, sp_season_id, opens_at, closes_at, rule, status, created_by)
+        VALUES ('league', %s, %s, %s, %s, %s, %s, 'system')
     """, (entity_id, sp_season_id,
           datetime.combine(opens_at, datetime.min.time()),
           datetime.combine(closes_at, datetime.min.time()),
-          status))
-    print(f"  CREATED [reg_period]: table {entity_id} status={status} "
+          rule, status))
+    print(f"  CREATED [reg_period]: table {entity_id} rule={rule} status={status} "
           f"opens={opens_at} closes={closes_at}")
 
 

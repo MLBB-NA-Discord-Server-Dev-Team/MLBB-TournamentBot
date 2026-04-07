@@ -56,6 +56,18 @@ class TournamentBot(commands.Bot):
             await self.tree.sync(guild=guild)
             logger.info("Synced slash commands to guild %s", guild_id)
 
+        @self.tree.error
+        async def on_app_command_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
+            logger.error("Slash command error in /%s: %s", interaction.command and interaction.command.qualified_name, error, exc_info=error)
+            msg = f"❌ An unexpected error occurred: `{error}`"
+            try:
+                if interaction.response.is_done():
+                    await interaction.followup.send(msg, ephemeral=True)
+                else:
+                    await interaction.response.send_message(msg, ephemeral=True)
+            except Exception:
+                pass
+
     async def on_ready(self):
         logger.info("TournamentBot ready — logged in as %s (ID: %s)", self.user, self.user.id)
         await self._bootstrap_notifications_channel()

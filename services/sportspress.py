@@ -40,7 +40,9 @@ class SportsPressAPI:
         url = f"{base or self.sp_url}/{endpoint}"
         async with aiohttp.ClientSession() as session:
             async with session.post(url, headers=self.headers, json=data) as r:
-                r.raise_for_status()
+                if not r.ok:
+                    body = await r.text()
+                    raise Exception(f"{r.status} {r.reason} — {body}")
                 return await r.json()
 
     async def _patch(self, endpoint: str, data: Dict, base: str = None) -> Any:
@@ -122,14 +124,38 @@ class SportsPressAPI:
     async def delete_tournament(self, post_id: int) -> Dict:
         return await self._delete(f"tournaments/{post_id}")
 
+    # ── Leagues (sp_league taxonomy/post) ─────────────────────────────────
+
+    async def create_league(self, name: str, description: str = "") -> Dict:
+        return await self._post("leagues", {
+            "name": name,
+            "description": description,
+        })
+
+    async def delete_league(self, term_id: int) -> Dict:
+        return await self._delete(f"leagues/{term_id}")
+
     # ── Tables (League standings) ──────────────────────────────────────────
 
-    async def create_table(self, name: str, description: str = "") -> Dict:
-        return await self._post("tables", {
-            "title": name,
-            "content": description,
+    async def create_table(
+        self, name: str, description: str = "",
+        league_ids: List[int] = None, season_ids: List[int] = None,
+    ) -> Dict:
+        data: Dict = {"title": name, "content": description, "status": "publish"}
+        if league_ids:
+            data["leagues"] = league_ids
+        if season_ids:
+            data["seasons"] = season_ids
+        return await self._post("tables", data)
+
+    async def create_page(self, title: str, content: str, slug: str) -> Dict:
+        """Create a standard WordPress page via wp/v2/pages."""
+        return await self._post("pages", {
+            "title": title,
+            "content": content,
+            "slug": slug,
             "status": "publish",
-        })
+        }, base=self.wp_url)
 
     async def delete_table(self, post_id: int) -> Dict:
         return await self._delete(f"tables/{post_id}")
@@ -137,15 +163,21 @@ class SportsPressAPI:
     # ── Events (Matches) ───────────────────────────────────────────────────
 
     async def create_event(
-        self, name: str, home_team: int, away_team: int, date: str, description: str = ""
+        self, name: str, home_team: int, away_team: int, date: str,
+        description: str = "", league_ids: List[int] = None, season_ids: List[int] = None,
     ) -> Dict:
-        return await self._post("events", {
+        data: Dict = {
             "title": name,
             "content": description,
-            "status": "publish",
+            "status": "future",
             "teams": [home_team, away_team],
             "date": date,
-        })
+        }
+        if league_ids:
+            data["leagues"] = league_ids
+        if season_ids:
+            data["seasons"] = season_ids
+        return await self._post("events", data)
 
     async def delete_event(self, post_id: int) -> Dict:
         return await self._delete(f"events/{post_id}")

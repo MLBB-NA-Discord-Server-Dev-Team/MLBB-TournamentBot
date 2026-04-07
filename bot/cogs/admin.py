@@ -9,7 +9,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 import config
 from services import db, admin_log
 from services.admin_log import Event
-from services.db_helpers import list_tables, list_tournaments
+from services.db_helpers import (
+    list_tables, list_tournaments, get_rule_for_table,
+    get_approved_teams_for_period, get_league_term_for_table,
+    get_season_for_period, get_play_end_for_season,
+)
+from services.round_robin import generate_schedule, ScheduleError
+from services.sportspress import SportsPressAPI
 
 
 def admin_check():
@@ -29,7 +35,7 @@ def admin_check():
 class Admin(commands.Cog):
     """Admin and organizer commands"""
 
-    admin = app_commands.Group(name="admin", description="Admin commands")
+    admin = app_commands.Group(name="league-admin", description="Admin commands for league management")
 
     @admin.command(name="resolve-dispute", description="Override a disputed match result")
     @app_commands.describe(
@@ -94,7 +100,7 @@ class Admin(commands.Cog):
             ephemeral=True,
         )
 
-        await admin_log.log(self.bot, Event.DISPUTE_RESOLVED, user=interaction.user, fields={
+        await admin_log.log(interaction.client, Event.DISPUTE_RESOLVED, user=interaction.user, fields={
             "Submission ID": f"#{submission_id}",
             "Winner Team ID": winner_team_id,
             "Resolved by": f"<@{interaction.user.id}>",
@@ -145,12 +151,23 @@ class Admin(commands.Cog):
         entity_type="league or tournament",
         entity_id="The post ID (use /league list or /tournament list)",
         closes_in_days="How many days until registration closes (default 7)",
+        rule="Match format (leagues only)",
         max_teams="Maximum teams allowed (leave blank for unlimited)",
     )
-    @app_commands.choices(entity_type=[
-        app_commands.Choice(name="League", value="league"),
-        app_commands.Choice(name="Tournament", value="tournament"),
-    ])
+    @app_commands.choices(
+        entity_type=[
+            app_commands.Choice(name="League", value="league"),
+            app_commands.Choice(name="Tournament", value="tournament"),
+        ],
+        rule=[
+            app_commands.Choice(name="Draft Pick BO1", value="DPBO1"),
+            app_commands.Choice(name="Draft Pick BO3", value="DPBO3"),
+            app_commands.Choice(name="Draft Pick BO5", value="DPBO5"),
+            app_commands.Choice(name="Brawl BO1", value="BrawlBO1"),
+            app_commands.Choice(name="Brawl BO3", value="BrawlBO3"),
+            app_commands.Choice(name="Brawl BO5", value="BrawlBO5"),
+        ],
+    )
     @admin_check()
     async def open_registration(
         self,
@@ -158,6 +175,7 @@ class Admin(commands.Cog):
         entity_type: str,
         entity_id: int,
         closes_in_days: int = 7,
+        rule: str = None,
         max_teams: int = None,
     ):
         await interaction.response.defer(ephemeral=True)
@@ -175,6 +193,10 @@ class Admin(commands.Cog):
             )
             return
 
+        # Auto-detect rule from sp_league termmeta if not provided
+        if rule is None and entity_type == 'league':
+            rule = await get_rule_for_table(entity_id)
+
         async with db.get_conn() as conn:
             async with conn.cursor() as cur:
                 # Close any existing open period for this entity
@@ -189,10 +211,10 @@ class Admin(commands.Cog):
                 await cur.execute(
                     """
                     INSERT INTO mlbb_registration_periods
-                        (entity_type, entity_id, opens_at, closes_at, max_teams, created_by, status)
-                    VALUES (%s, %s, NOW(), DATE_ADD(NOW(), INTERVAL %s DAY), %s, %s, 'open')
+                        (entity_type, entity_id, opens_at, closes_at, max_teams, rule, created_by, status)
+                    VALUES (%s, %s, NOW(), DATE_ADD(NOW(), INTERVAL %s DAY), %s, %s, %s, 'open')
                     """,
-                    (entity_type, entity_id, closes_in_days, max_teams, str(interaction.user.id)),
+                    (entity_type, entity_id, closes_in_days, max_teams, rule, str(interaction.user.id)),
                 )
                 period_id = cur.lastrowid
 
@@ -204,13 +226,16 @@ class Admin(commands.Cog):
         embed.add_field(name="Type", value=entity_type.capitalize())
         embed.add_field(name="Entity ID", value=entity_id)
         embed.add_field(name="Period ID", value=period_id)
+        if rule:
+            embed.add_field(name="Rule", value=rule)
         embed.add_field(name="Closes in", value=f"{closes_in_days} days")
         embed.add_field(name="Max teams", value=cap_text)
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-        await admin_log.log(self.bot, Event.SYSTEM, user=interaction.user, fields={
+        await admin_log.log(interaction.client, Event.SYSTEM, user=interaction.user, fields={
             "Action": "Registration opened",
             "Entity": f"{entity_type.capitalize()} #{entity_id} — {entity['title']}",
+            "Rule": rule or "—",
             "Closes in": f"{closes_in_days} days",
             "Max teams": cap_text,
         })
@@ -452,12 +477,176 @@ class Admin(commands.Cog):
         embed.set_footer(text="Registration will open automatically on the opens date.")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-        await admin_log.log(self.bot, Event.SYSTEM, user=interaction.user, fields={
+        await admin_log.log(interaction.client, Event.SYSTEM, user=interaction.user, fields={
             "Action": "Season configured",
             "Season": f"{season_name} (ID {sp_season_id})",
             "Registration": f"{reg_opens} → {reg_closes}",
             "Entities": f"{len(leagues)} leagues, {len(tournaments)} tournaments",
             "Periods created": created,
+        })
+
+
+    @admin.command(
+        name="generate-schedule",
+        description="Generate round-robin schedule for a league (preview or create events)",
+    )
+    @app_commands.describe(
+        period_id="Registration period ID (use /league list to find it)",
+        preview="Preview only — don't create events (default: True)",
+    )
+    @admin_check()
+    async def generate_schedule_cmd(
+        self, interaction: discord.Interaction, period_id: int, preview: bool = True,
+    ):
+        await interaction.response.defer(ephemeral=True)
+
+        # Fetch period info
+        async with db.get_conn() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    SELECT rp.id, rp.entity_id, rp.rule, rp.status, p.post_title
+                    FROM mlbb_registration_periods rp
+                    JOIN wp_posts p ON p.ID = rp.entity_id
+                    WHERE rp.id = %s AND rp.entity_type = 'league'
+                    """,
+                    (period_id,),
+                )
+                period = await cur.fetchone()
+
+        if not period:
+            await interaction.followup.send(
+                f"❌ No league registration period with ID `{period_id}`.", ephemeral=True
+            )
+            return
+
+        _, entity_id, rule, status, title = period
+
+        # Get approved teams (all, then filter eligible)
+        all_teams = await get_approved_teams_for_period(period_id, eligible_only=False)
+        teams = [t for t in all_teams if 5 <= t["roster_count"] <= 6]
+        ineligible = [t for t in all_teams if not (5 <= t["roster_count"] <= 6)]
+
+        if ineligible:
+            inelig_lines = "\n".join(
+                f"• **{t['team_name']}** — {t['roster_count']} players (need 5-6)"
+                for t in ineligible
+            )
+            await interaction.followup.send(
+                f"⚠️ **Ineligible teams** (need exactly 6 roster members):\n{inelig_lines}",
+                ephemeral=True,
+            )
+
+        if len(teams) < 2:
+            await interaction.followup.send(
+                f"❌ Only {len(teams)} eligible team(s) for **{title}**. Need at least 2.",
+                ephemeral=True,
+            )
+            return
+
+        if len(teams) > 16:
+            await interaction.followup.send(
+                f"❌ {len(teams)} approved teams exceeds the 16-team cap.", ephemeral=True
+            )
+            return
+
+        # Get season window
+        season_info = await get_season_for_period(period_id)
+        if not season_info:
+            await interaction.followup.send(
+                "❌ No season linked to this period. Set `sp_season_id` first.", ephemeral=True
+            )
+            return
+
+        play_start = season_info["play_start"]
+        play_end = await get_play_end_for_season(season_info["sp_season_id"])
+        if not play_end:
+            await interaction.followup.send("❌ Cannot determine season end date.", ephemeral=True)
+            return
+
+        # Generate abstract schedule
+        team_ids = [t["sp_team_id"] for t in teams]
+        team_names = {t["sp_team_id"]: t["team_name"] for t in teams}
+
+        try:
+            entries = generate_schedule(team_ids, play_start, play_end)
+        except ScheduleError as e:
+            await interaction.followup.send(f"❌ Cannot generate schedule: {e}", ephemeral=True)
+            return
+
+        # Build preview
+        total = len(entries)
+        days_used = len({e["date"] for e in entries})
+        first_date = entries[0]["date"]
+        last_date = entries[-1]["date"]
+
+        summary = (
+            f"**{title}** — {season_info['season_name']}\n"
+            f"Teams: {len(teams)} | Matches: {total} | Days: {days_used}\n"
+            f"Window: {first_date} → {last_date}\n"
+        )
+
+        # Show first 15 matches
+        lines = []
+        for e in entries[:15]:
+            h = team_names[e["home_team_id"]]
+            a = team_names[e["away_team_id"]]
+            lines.append(f"`{e['date']}` R{e['round']} — **{h}** vs **{a}**")
+        if total > 15:
+            lines.append(f"*... and {total - 15} more matches*")
+
+        if preview:
+            embed = discord.Embed(
+                title="📅 Schedule Preview", description=summary + "\n".join(lines),
+                color=0xFFB703,
+            )
+            embed.set_footer(text="Run with preview:False to create events.")
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+        # Create events
+        league_term_id = await get_league_term_for_table(entity_id)
+        api = SportsPressAPI(config.WP_URL, config.WP_USER, config.WP_APP_PASSWORD)
+        league_ids = [league_term_id] if league_term_id else None
+        season_ids = [season_info["sp_season_id"]]
+
+        created = 0
+        errors = 0
+        for entry in entries:
+            h_name = team_names[entry["home_team_id"]]
+            a_name = team_names[entry["away_team_id"]]
+            name = f"{h_name} vs {a_name}"
+            date_str = f"{entry['date'].isoformat()}T{entry['time']}"
+
+            try:
+                await api.create_event(
+                    name, entry["home_team_id"], entry["away_team_id"],
+                    date_str, league_ids=league_ids, season_ids=season_ids,
+                )
+                created += 1
+            except Exception as e:
+                errors += 1
+                if errors <= 3:
+                    await interaction.followup.send(
+                        f"⚠️ Failed to create event '{name}': {e}", ephemeral=True
+                    )
+
+        embed = discord.Embed(
+            title="✅ Schedule Generated",
+            description=summary,
+            color=0x2ECC71,
+        )
+        embed.add_field(name="Events Created", value=f"{created}/{total}")
+        if errors:
+            embed.add_field(name="Errors", value=str(errors))
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+        await admin_log.log(self.bot, Event.SYSTEM, user=interaction.user, fields={
+            "Action": "Round-robin schedule generated (manual)",
+            "League": title,
+            "Season": season_info["season_name"],
+            "Teams": len(teams),
+            "Events": f"{created}/{total}",
         })
 
 
