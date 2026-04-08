@@ -174,7 +174,7 @@ class Match(commands.Cog):
         )
 
         # Post to #match-notifications
-        notif_channel = _notifications_channel(self.bot)
+        notif_channel = _notifications_channel(interaction.client)
         if notif_channel:
             await notif_channel.send(embed=embed)
 
@@ -194,7 +194,7 @@ class Match(commands.Cog):
             ephemeral=True,
         )
 
-        await admin_log.log(self.bot, Event.MATCH_SUBMITTED, user=interaction.user, fields={
+        await admin_log.log(interaction.client, Event.MATCH_SUBMITTED, user=interaction.user, fields={
             "Submission ID": f"#{submission_id}",
             "Winning Team": captain["team_name"],
             "Score": f"{result.winner_kills}–{result.loser_kills}",
@@ -263,7 +263,7 @@ class Match(commands.Cog):
         embed.add_field(name="Score", value=f"**{winner_kills} – {loser_kills}**", inline=True)
         embed.set_footer(text=f"Confirmed by {interaction.user}")
 
-        notif_channel = _notifications_channel(self.bot)
+        notif_channel = _notifications_channel(interaction.client)
         if notif_channel:
             await notif_channel.send(embed=embed)
 
@@ -271,7 +271,7 @@ class Match(commands.Cog):
             f"✅ Result `#{submission_id}` confirmed.", ephemeral=True
         )
 
-        await admin_log.log(self.bot, Event.MATCH_CONFIRMED, user=interaction.user, fields={
+        await admin_log.log(interaction.client, Event.MATCH_CONFIRMED, user=interaction.user, fields={
             "Submission ID": f"#{submission_id}",
             "BattleID": battle_id,
             "Score": f"{winner_kills}–{loser_kills}",
@@ -335,7 +335,7 @@ class Match(commands.Cog):
         embed.add_field(name="Disputed by", value=str(interaction.user), inline=True)
         embed.add_field(name="Reason", value=reason, inline=False)
 
-        notif_channel = _notifications_channel(self.bot)
+        notif_channel = _notifications_channel(interaction.client)
         if notif_channel:
             # Ping admins
             staff_ping = " ".join(
@@ -360,7 +360,7 @@ class Match(commands.Cog):
             f"⚠️ Dispute filed for `#{submission_id}`. Admins have been notified.", ephemeral=True
         )
 
-        await admin_log.log(self.bot, Event.MATCH_DISPUTED, user=interaction.user, fields={
+        await admin_log.log(interaction.client, Event.MATCH_DISPUTED, user=interaction.user, fields={
             "Submission ID": f"#{submission_id}",
             "Disputed by": f"<@{interaction.user.id}>",
             "Reason": reason,

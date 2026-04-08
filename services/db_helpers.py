@@ -488,6 +488,66 @@ async def set_player_photos(sp_player_id: int, media_id: int) -> None:
                     )
 
 
+# ── Event results ─────────────────────────────────────────────────────────
+
+async def set_event_results(
+    sp_event_id: int,
+    home_team_id: int,
+    away_team_id: int,
+    home_score: int,
+    away_score: int,
+) -> None:
+    """
+    Write SportsPress match results onto an sp_event post.
+
+    Sets sp_results (serialized PHP), sp_main_result, and changes
+    post_status from 'future' to 'publish' so SportsPress recalculates
+    league table standings.
+    """
+    import phpserialize
+
+    home_outcome = "win" if home_score > away_score else ("loss" if home_score < away_score else "draw")
+    away_outcome = "win" if away_score > home_score else ("loss" if away_score < home_score else "draw")
+
+    # Resolve the primary result column slug from sp_result posts.
+    # Defaults to 'kills' — the standard MLBB result column.
+    async with db.get_conn() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT post_name FROM wp_posts WHERE post_type='sp_result' AND post_status='publish' ORDER BY menu_order LIMIT 1"
+            )
+            row = await cur.fetchone()
+    result_key = row[0] if row else "kills"
+
+    results = {
+        home_team_id: {
+            b"outcome": [home_outcome.encode()],
+            result_key.encode(): str(home_score).encode(),
+        },
+        away_team_id: {
+            b"outcome": [away_outcome.encode()],
+            result_key.encode(): str(away_score).encode(),
+        },
+    }
+    serialised = phpserialize.dumps(results).decode()
+
+    async with db.get_conn() as conn:
+        async with conn.cursor() as cur:
+            for key, val in [("sp_results", serialised), ("sp_main_result", result_key)]:
+                await cur.execute(
+                    "DELETE FROM wp_postmeta WHERE post_id=%s AND meta_key=%s",
+                    (sp_event_id, key),
+                )
+                await cur.execute(
+                    "INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (%s, %s, %s)",
+                    (sp_event_id, key, val),
+                )
+            await cur.execute(
+                "UPDATE wp_posts SET post_status='publish' WHERE ID=%s AND post_status='future'",
+                (sp_event_id,),
+            )
+
+
 # ── Event scheduling ──────────────────────────────────────────────────────
 
 async def check_team_has_event_on_date(team_id: int, date: str) -> Optional[dict]:

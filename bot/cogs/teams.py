@@ -23,12 +23,16 @@ from services.admin_log import Event
 from services.db_helpers import (
     get_player_by_discord_id,
     get_captain_team,
+    get_captain_teams,
+    get_player_active_team_ids,
     get_player_roster_entry,
     get_roster,
     get_any_pending_invite,
-    list_teams,
+    get_my_teams,
     set_team_colors,
     setup_team_roster_display,
+    get_team_url,
+    sync_team_roster_list,
 )
 from services.sportspress import SportsPressAPI
 
@@ -60,14 +64,8 @@ class Teams(commands.Cog):
             )
             return
 
-        existing_captain = await get_captain_team(discord_id)
-        if existing_captain:
-            await interaction.followup.send(
-                f"❌ You are already the captain of **{existing_captain['team_name']}**. "
-                "A player can only captain one team.",
-                ephemeral=True,
-            )
-            return
+        # Players may captain multiple teams (one per league) — no global block here.
+        # Per-league conflicts are enforced at registration time.
 
         api = get_api()
         try:
@@ -89,9 +87,10 @@ class Teams(commands.Cog):
                     (discord_id, player["id"], sp_team_id),
                 )
 
-        # Link captain to team in SportsPress so they appear on the team page
+        # Link captain to all their active teams in SportsPress (accumulate, don't overwrite)
         try:
-            await api.set_player_teams(player["id"], [sp_team_id])
+            all_team_ids = await get_player_active_team_ids(discord_id)
+            await api.set_player_teams(player["id"], all_team_ids)
         except Exception as e:
             logger.warning("Could not sync sp_team on captain %s: %s", player["id"], e)
 
@@ -100,6 +99,7 @@ class Teams(commands.Cog):
         try:
             sp_list = await api.create_player_list(f"{name} — Roster")
             await setup_team_roster_display(sp_team_id, sp_list["id"])
+            await sync_team_roster_list(sp_team_id)
         except Exception as e:
             logger.warning("Could not create roster list for team %s: %s", sp_team_id, e)
 
@@ -110,7 +110,7 @@ class Teams(commands.Cog):
         embed.set_footer(text="Use /team invite to add players.")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-        await admin_log.log(self.bot, Event.TEAM_CREATED, user=interaction.user, fields={
+        await admin_log.log(interaction.client, Event.TEAM_CREATED, user=interaction.user, fields={
             "Team": name,
             "Team ID": sp_team_id,
             "Captain": f"<@{discord_id}>",
@@ -119,7 +119,11 @@ class Teams(commands.Cog):
     # ── /team invite ──────────────────────────────────────────────────────
 
     @team.command(name="invite", description="Invite a registered player to your team")
-    @app_commands.describe(user="Discord member to invite", role="Player role on the team")
+    @app_commands.describe(
+        user="Discord member to invite",
+        role="Player role on the team",
+        team_id="Your team ID — required if you captain multiple teams",
+    )
     @app_commands.choices(role=[
         app_commands.Choice(name="Player", value="player"),
         app_commands.Choice(name="Substitute", value="substitute"),
@@ -129,6 +133,7 @@ class Teams(commands.Cog):
         interaction: discord.Interaction,
         user: discord.Member,
         role: str = "player",
+        team_id: int = None,
     ):
         await interaction.response.defer(ephemeral=True)
         discord_id = str(interaction.user.id)
@@ -138,10 +143,26 @@ class Teams(commands.Cog):
             await interaction.followup.send("❌ You can't invite yourself.", ephemeral=True)
             return
 
-        captain = await get_captain_team(discord_id)
-        if not captain:
+        captain_teams = await get_captain_teams(discord_id)
+        if not captain_teams:
             await interaction.followup.send(
                 "❌ You are not a captain. Only captains can invite players.", ephemeral=True
+            )
+            return
+
+        if team_id is not None:
+            captain = next((t for t in captain_teams if t["sp_team_id"] == team_id), None)
+            if not captain:
+                await interaction.followup.send(
+                    f"❌ You are not the captain of team `{team_id}`.", ephemeral=True
+                )
+                return
+        elif len(captain_teams) == 1:
+            captain = captain_teams[0]
+        else:
+            lines = "\n".join(f"`{t['sp_team_id']}` — **{t['team_name']}**" for t in captain_teams)
+            await interaction.followup.send(
+                f"❌ You captain multiple teams. Re-run with `team_id`:\n{lines}", ephemeral=True
             )
             return
 
@@ -200,7 +221,7 @@ class Teams(commands.Cog):
             f"✅ Invite sent to {user.mention} as **{role}**.", ephemeral=True
         )
 
-        await admin_log.log(self.bot, Event.TEAM_INVITE_SENT, user=interaction.user, fields={
+        await admin_log.log(interaction.client, Event.TEAM_INVITE_SENT, user=interaction.user, fields={
             "Team": captain["team_name"],
             "Invitee": f"<@{invitee_id}>",
             "Role": role,
@@ -245,11 +266,17 @@ class Teams(commands.Cog):
                     (invite["id"],),
                 )
 
-        # Sync team association to SportsPress so the player appears on the team page roster
+        # Sync all active team associations to SportsPress (accumulate, don't overwrite)
         try:
-            await get_api().set_player_teams(player["id"], [invite["sp_team_id"]])
+            all_team_ids = await get_player_active_team_ids(discord_id)
+            await get_api().set_player_teams(player["id"], all_team_ids)
         except Exception as e:
             logger.warning("Could not sync sp_team on player %s: %s", player["id"], e)
+
+        try:
+            await sync_team_roster_list(invite["sp_team_id"])
+        except Exception as e:
+            logger.warning("Could not sync roster list for team %s: %s", invite["sp_team_id"], e)
 
         embed = discord.Embed(
             title=f"✅ Joined {invite['team_name']}",
@@ -258,7 +285,7 @@ class Teams(commands.Cog):
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-        await admin_log.log(self.bot, Event.TEAM_INVITE_ACCEPTED, user=interaction.user, fields={
+        await admin_log.log(interaction.client, Event.TEAM_INVITE_ACCEPTED, user=interaction.user, fields={
             "Team": invite["team_name"],
             "Player": f"<@{discord_id}>",
             "Role": invite["role"],
@@ -267,8 +294,16 @@ class Teams(commands.Cog):
     # ── /team kick ────────────────────────────────────────────────────────
 
     @team.command(name="kick", description="Remove a player from your team")
-    @app_commands.describe(user="The player to remove")
-    async def team_kick(self, interaction: discord.Interaction, user: discord.Member):
+    @app_commands.describe(
+        user="The player to remove",
+        team_id="Your team ID — required if you captain multiple teams",
+    )
+    async def team_kick(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member,
+        team_id: int = None,
+    ):
         await interaction.response.defer(ephemeral=True)
         discord_id = str(interaction.user.id)
         target_id = str(user.id)
@@ -280,9 +315,25 @@ class Teams(commands.Cog):
             )
             return
 
-        captain = await get_captain_team(discord_id)
-        if not captain:
+        captain_teams = await get_captain_teams(discord_id)
+        if not captain_teams:
             await interaction.followup.send("❌ You are not a captain.", ephemeral=True)
+            return
+
+        if team_id is not None:
+            captain = next((t for t in captain_teams if t["sp_team_id"] == team_id), None)
+            if not captain:
+                await interaction.followup.send(
+                    f"❌ You are not the captain of team `{team_id}`.", ephemeral=True
+                )
+                return
+        elif len(captain_teams) == 1:
+            captain = captain_teams[0]
+        else:
+            lines = "\n".join(f"`{t['sp_team_id']}` — **{t['team_name']}**" for t in captain_teams)
+            await interaction.followup.send(
+                f"❌ You captain multiple teams. Re-run with `team_id`:\n{lines}", ephemeral=True
+            )
             return
 
         async with db.get_conn() as conn:
@@ -304,13 +355,19 @@ class Teams(commands.Cog):
             )
             return
 
-        # Remove team from SportsPress player record (keep them as a player, just no team)
+        # Update SportsPress: remove this team but keep any other active team associations
         kicked_player = await get_player_by_discord_id(target_id)
         if kicked_player:
             try:
-                await get_api().set_player_teams(kicked_player["id"], [])
+                remaining_ids = await get_player_active_team_ids(target_id)
+                await get_api().set_player_teams(kicked_player["id"], remaining_ids)
             except Exception as e:
-                logger.warning("Could not clear sp_team on player %s: %s", kicked_player["id"], e)
+                logger.warning("Could not update sp_team on player %s: %s", kicked_player["id"], e)
+
+        try:
+            await sync_team_roster_list(captain["sp_team_id"])
+        except Exception as e:
+            logger.warning("Could not sync roster list for team %s: %s", captain["sp_team_id"], e)
 
         try:
             await user.send(
@@ -323,7 +380,7 @@ class Teams(commands.Cog):
             f"✅ {user.mention} removed from **{captain['team_name']}**.", ephemeral=True
         )
 
-        await admin_log.log(self.bot, Event.PLAYER_KICKED, user=interaction.user, fields={
+        await admin_log.log(interaction.client, Event.PLAYER_KICKED, user=interaction.user, fields={
             "Team": captain["team_name"],
             "Kicked": f"<@{target_id}>",
             "Captain": f"<@{discord_id}>",
@@ -371,7 +428,8 @@ class Teams(commands.Cog):
             description="\n".join(lines),
             color=0x3A86FF,
         )
-        embed.set_footer(text=f"Team ID: {team_id} · {config.WP_URL}/?p={team_id}")
+        team_url = await get_team_url(team_id, config.WP_URL)
+        embed.set_footer(text=f"Team ID: {team_id} · {team_url}")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     # ── /team edit ────────────────────────────────────────────────────────
@@ -486,10 +544,11 @@ class Teams(commands.Cog):
             description="\n".join(results),
             color=discord.Color.from_str(color1_hex) if color1_hex else 0x2ECC71,
         )
-        embed.set_footer(text=f"View team: {config.WP_URL}/team/{captain['sp_team_id']}/")
+        team_url = await get_team_url(captain["sp_team_id"], config.WP_URL)
+        embed.set_footer(text=f"View team: {team_url}")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-        await admin_log.log(self.bot, Event.SYSTEM, user=interaction.user, fields={
+        await admin_log.log(interaction.client, Event.SYSTEM, user=interaction.user, fields={
             "Action": "Team edited",
             "Team": captain["team_name"],
             "Changes": ", ".join(results),
@@ -574,7 +633,7 @@ class Teams(commands.Cog):
             f"✅ Team **{team_name}** (`{team_id}`) has been deleted.", ephemeral=True
         )
 
-        await admin_log.log(self.bot, Event.SYSTEM, user=interaction.user, fields={
+        await admin_log.log(interaction.client, Event.SYSTEM, user=interaction.user, fields={
             "Action": "Team deleted",
             "Team": team_name,
             "Team ID": team_id,
@@ -583,27 +642,33 @@ class Teams(commands.Cog):
 
     # ── /team list ────────────────────────────────────────────────────────
 
-    @team.command(name="list", description="List all teams")
+    @team.command(name="list", description="List your teams and roles")
     async def team_list(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
+        discord_id = str(interaction.user.id)
         try:
-            teams = await list_teams()
+            teams = await get_my_teams(discord_id)
         except Exception as e:
             await interaction.followup.send(f"❌ DB error: {e}", ephemeral=True)
             return
 
         if not teams:
-            await interaction.followup.send("No teams found.", ephemeral=True)
+            await interaction.followup.send(
+                "You are not on any teams. Use `/team create` to start one.", ephemeral=True
+            )
             return
 
-        lines = [f"`{t['id']}` — **{t['title']}**" for t in teams[:25]]
+        role_emoji = {"captain": "👑", "player": "🎮", "substitute": "🔄"}
+        lines = [
+            f"{role_emoji.get(t['role'], '•')} **{t['team_name']}** — {t['role'].capitalize()} "
+            f"(`{t['sp_team_id']}`)"
+            for t in teams
+        ]
         embed = discord.Embed(
-            title=f"Teams ({len(teams)})",
+            title=f"Your Teams ({len(teams)})",
             description="\n".join(lines),
             color=0x3A86FF,
         )
-        if len(teams) > 25:
-            embed.set_footer(text=f"Showing 25 of {len(teams)} teams")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
 

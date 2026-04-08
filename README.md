@@ -196,27 +196,160 @@ sudo journalctl -u tournament-bot -f
 
 ---
 
+## Player Journey (Quick-Start)
+
+The full guide lives at [play.mlbb.site/quickstart/](https://play.mlbb.site/quickstart/) and in-Discord via `/league quickstart`.
+
+Each step maps to a slash command and a headless service function in `services/command_services.py`:
+
+| Step | What you do | Slash command | Service function |
+|------|------------|---------------|------------------|
+| **1. Register** | Link Discord to MLBB profile | `/player register [ign]` | `player_register()` |
+| **2. Create team** | Form a team (you become captain) | `/team create [name]` | `team_create()` |
+| **2b. Invite** | Add teammates to your roster | `/team invite @user` | `team_invite()` |
+| **2c. Accept** | Teammates accept the invite | `/team accept` | `team_accept()` |
+| **3. Browse leagues** | See open leagues and formats | `/league list` | read-only |
+| **3b. Sign up** | Register your team for a league | `/league register [id]` | `league_register()` |
+| **4. Wait** | Admin approves + season starts | — | `admin_approve_registration()` |
+| **5. Check schedule** | View events table on league page | — | read-only |
+| **6. Play** | Join voice channel, play match | — | Discord VC lifecycle |
+| **7. Submit result** | Winning captain uploads screenshot | `/match submit [screenshot]` | `match_submit()` |
+| **7b. Confirm** | Losing captain verifies | `/match confirm [#id]` | `match_confirm()` |
+| **7c. Dispute** | Losing captain flags issue | `/match dispute [#id] [reason]` | `match_dispute()` |
+| **8. Standings** | Check your rank on the league page | `/player profile` | `player_profile()` |
+
+### Additional management commands
+
+| Command | Who | Service function |
+|---------|-----|------------------|
+| `/team edit` | Captain | `team_edit()` — upload logo, set team colours |
+| `/team kick @user` | Captain | `team_kick()` — remove a player from roster |
+| `/team delete` | Captain/Admin | `team_delete()` — disband team, clean up all links |
+| `/team roster [id]` | Anyone | `team_roster()` — view a team's full roster |
+| `/team list` | Anyone | `team_list()` — list your own team memberships |
+| `/tournament register [id]` | Captain | `tournament_register()` — sign up for a tournament |
+
+---
+
 ## Commands Reference
 
 Run `/tournament help` in Discord for a live list with role-gated admin commands.
+
+### Player-facing commands
 
 | Group | Command | Who |
 |-------|---------|-----|
 | `/player` | `register [ign]` | Anyone |
 | `/player` | `profile [@user]` | Anyone |
 | `/team` | `create [name]` | Registered players |
-| `/team` | `invite [@user]` | Captain |
+| `/team` | `invite [@user] [role]` | Captain |
 | `/team` | `accept` | Invited player |
 | `/team` | `kick [@user]` | Captain |
+| `/team` | `edit [picture] [color1] [color2]` | Captain |
+| `/team` | `delete [team_id]` | Captain / Admin |
 | `/team` | `roster [team_id]` | Anyone |
 | `/team` | `list` | Anyone |
-| `/match` | `submit [screenshot]` | Captain (winning team) |
-| `/match` | `confirm [#id]` | Opposing captain |
-| `/match` | `dispute [#id] [reason]` | Captain |
-| `/pickup` | `join / leave / status / bracket` | Captain / Anyone |
+| `/league` | `list [search]` | Anyone |
+| `/league` | `register [league_id]` | Captain |
+| `/league` | `quickstart` | Anyone |
+| `/match` | `submit [screenshot] [event_id]` | Captain (winning team) |
+| `/match` | `confirm [submission_id]` | Opposing captain |
+| `/match` | `dispute [submission_id] [reason]` | Captain |
+| `/tournament` | `register [tournament_id]` | Captain |
+| `/tournament` | `help` | Anyone |
+| `/pickup` | `status` | Anyone |
+
+### Staff commands
+
+| Group | Command | Who |
+|-------|---------|-----|
+| `/league` | `create [name] [rule]` | Admin |
+| `/league` | `delete [league_id]` | Admin |
+| `/league-admin` | `open-registration` | Admin |
+| `/league-admin` | `close-registration` | Admin |
+| `/league-admin` | `registrations` | Admin |
+| `/league-admin` | `approve-registration [#id]` | Admin |
+| `/league-admin` | `pending` | Admin |
+| `/league-admin` | `resolve-dispute [#id] [winner]` | Admin |
+| `/league-admin` | `set-season` | Admin |
 | `/tournament` | `list / create / delete / add-event` | Organizer |
-| `/league` | `list / create / delete` | Organizer (list: anyone) |
-| `/admin` | `pending / resolve-dispute` | Admin |
+
+---
+
+## Service Layer (`services/command_services.py`)
+
+Standalone async functions that mirror the business logic of every slash command.
+Each returns a `Result(ok, data, error)` — no Discord dependency.
+
+```python
+from services.command_services import player_register, team_create, match_submit, Result
+
+result = await player_register(api, discord_id, username, ign, avatar_png=png_bytes)
+if not result.ok:
+    print(result.error)
+else:
+    print(result.data["sp_player_id"])
+```
+
+Used by `scripts/simulate_league.py` to test the full player journey headlessly.
+
+| Function | Mirrors | Validations |
+|----------|---------|-------------|
+| `player_register(api, discord_id, username, ign, avatar_png)` | `/player register` | dupe check, SP create, metrics, 3 photo fields |
+| `player_profile(discord_id)` | `/player profile` | registered check, team list |
+| `team_create(api, discord_id, name, logo_png, color1, color2)` | `/team create` | registered, SP team + roster + sp_list + ACF + logo |
+| `team_invite(discord_id, invitee_id, team_id, role)` | `/team invite` | captain, invitee registered, not on team |
+| `team_accept(api, invitee_id)` | `/team accept` | pending invite, SP sync + roster list sync |
+| `team_kick(api, discord_id, target_id, team_id)` | `/team kick` | captain, self-kick, non-captain target |
+| `team_edit(api, discord_id, team_id, logo, c1, c2)` | `/team edit` | captain, at least 1 param |
+| `team_delete(api, discord_id, team_id, is_admin)` | `/team delete` | captain/admin, full teardown |
+| `team_roster(discord_id, team_id)` | `/team roster` | team exists |
+| `team_list(discord_id)` | `/team list` | — |
+| `league_register(discord_id, league_id, team_id)` | `/league register` | captain, open period, dupe, conflict, cap |
+| `admin_approve_registration(reg_id, reviewer_id)` | `/league-admin approve` | pending check |
+| `match_submit(discord_id, match_data, event_id)` | `/match submit` | captain, battle ID dupe |
+| `match_confirm(discord_id, submission_id)` | `/match confirm` | captain, exists, not self |
+| `match_dispute(discord_id, submission_id, reason)` | `/match dispute` | captain, exists, not self |
+| `tournament_register(discord_id, tournament_id, team_id)` | `/tournament register` | captain, open period, dupe, conflict, cap |
+
+---
+
+## Simulation
+
+End-to-end league simulation that exercises all service functions under production conditions.
+
+```bash
+cd /root/MLBB-TournamentBot
+source venv/bin/activate
+
+# Full run (4 teams, random rule, cleanup after)
+python scripts/simulate_league.py
+
+# 6-team Brawl BO3, keep artifacts for inspection
+python scripts/simulate_league.py --teams 6 --rule BrawlBO3 --round-delay 3 --no-cleanup
+
+# Preview the plan without creating anything
+python scripts/simulate_league.py --dry-run --teams 4
+```
+
+### What the simulation creates
+
+| Phase | What | Service functions exercised |
+|-------|------|----|
+| 1 | Bot-* league with random name + rule | `create_league`, registration period |
+| 2 | N players (pixel-art avatars, gamer-tag usernames) | `player_register()` x N |
+| 3 | N/5 teams (pixel-art logos, palette colours) | `team_create()`, `team_invite()`, `team_accept()` |
+| 4 | Team registrations (with conflict checks) | `league_register()`, `admin_approve_registration()` |
+| 5 | Round-robin schedule | sp_event posts |
+| 6 | Match results (VC create/delete, BO1/3/5 series) | `match_submit()`, `match_confirm()` |
+| 7 | Final standings + champion | `player_profile()` |
+| 8 | WordPress league page under /bot-leagues/ | teams, schedule, standings tables |
+| 9 | Cleanup (unless `--no-cleanup`) | all artifacts removed |
+
+### Bot Leagues hub
+
+Simulated leagues appear at [play.mlbb.site/bot-leagues/](https://play.mlbb.site/bot-leagues/).
+Each league gets its own child page with teams, schedule, and final standings.
 
 ---
 
