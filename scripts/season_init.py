@@ -58,17 +58,34 @@ def season_name(start: date) -> str:
 
 
 def build_season_schedule() -> list[dict]:
+    """
+    Generate a rolling buffer of seasons: all past seasons from SEASON_ZERO
+    up to today, plus SEASONS_AHEAD future seasons relative to today.
+    This keeps the buffer fresh regardless of when the script runs.
+    """
     seasons = []
-    for i in range(SEASONS_AHEAD):
-        start     = SEASON_ZERO + timedelta(days=SEASON_INTERVAL * i)
+    today = date.today()
+
+    # Start from SEASON_ZERO, iterate until we're SEASONS_AHEAD past today
+    i = 0
+    while True:
+        start = SEASON_ZERO + timedelta(days=SEASON_INTERVAL * i)
+        # Stop when we're SEASONS_AHEAD past today
+        if start > today + timedelta(days=SEASON_INTERVAL * SEASONS_AHEAD):
+            break
         reg_opens = start - timedelta(days=REG_LEAD_DAYS)
+        play_end  = start + timedelta(days=SEASON_INTERVAL)
         seasons.append({
             "name":       season_name(start),
             "slug":       season_name(start).lower().replace(" ", "-"),
             "play_start": start,
+            "play_end":   play_end,
             "reg_opens":  reg_opens,
             "reg_closes": start,
         })
+        i += 1
+        if i > 100:  # Safety: don't loop forever
+            break
     return seasons
 
 
@@ -114,6 +131,52 @@ def update_term_description(endpoint: str, term_id: int, description: str):
     )
 
 
+
+
+def _apply_standings_meta_sync(cur, sp_table_id: int) -> None:
+    """
+    Sync version of apply_standings_table_meta for season_init.py (which uses
+    mysql.connector, not aiomysql). Sets standard SportsPress standings metadata.
+    """
+    import phpserialize
+
+    sp_event_status = phpserialize.dumps({0: b"publish", 1: b"future"}).decode()
+    sp_columns = phpserialize.dumps({
+        0: b"wins", 1: b"losses", 2: b"winrate"
+    }).decode()
+    empty_array = phpserialize.dumps({}).decode()
+
+    meta_pairs = [
+        ("sp_mode", "team"),
+        ("sp_format", "standings"),
+        ("sp_caption", ""),
+        ("sp_date", "0"),
+        ("sp_date_from", "2024-01-14"),
+        ("sp_date_to", "2024-01-14"),
+        ("sp_date_past", "7"),
+        ("sp_date_relative", "0"),
+        ("sp_main_league", ""),
+        ("sp_current_season", ""),
+        ("sp_select", "auto"),
+        ("sp_orderby", "wins"),
+        ("sp_order", "DESC"),
+        ("sp_event_status", sp_event_status),
+        ("sp_highlight", "0"),
+        ("sp_columns", sp_columns),
+        ("sp_adjustments", empty_array),
+        ("sp_teams", empty_array),
+        ("sp_highlight_places", "NULL"),
+    ]
+    for meta_key, meta_value in meta_pairs:
+        cur.execute(
+            "DELETE FROM wp_postmeta WHERE post_id=%s AND meta_key=%s",
+            (sp_table_id, meta_key),
+        )
+        cur.execute(
+            "INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (%s, %s, %s)",
+            (sp_table_id, meta_key, meta_value),
+        )
+
 def get_or_create_table(title: str, league_id: int, season_id: int) -> int:
     """Return existing sp_table ID or create and return new one."""
     existing = sp_get("tables")
@@ -128,6 +191,20 @@ def get_or_create_table(title: str, league_id: int, season_id: int) -> int:
         "seasons": [season_id],
     })
     print(f"  CREATED [table]: {title} (id={created['id']})")
+    # Apply standings metadata directly via MySQL (REST API drops meta)
+    try:
+        import mysql.connector as _mc
+        from config import DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME
+        _conn = _mc.connect(host=DB_HOST, port=DB_PORT, user=DB_USER,
+                            password=DB_PASSWORD, database=DB_NAME)
+        _cur = _conn.cursor()
+        _apply_standings_meta_sync(_cur, created["id"])
+        _conn.commit()
+        _cur.close()
+        _conn.close()
+        print(f"    Applied standings metadata to table {created['id']}")
+    except Exception as e:
+        print(f"    WARNING: could not apply standings meta: {e}")
     return created["id"]
 
 
@@ -136,15 +213,16 @@ def get_or_create_table(title: str, league_id: int, season_id: int) -> int:
 def upsert_season_schedule(cur, sp_season_id: int, season: dict):
     cur.execute("""
         INSERT INTO mlbb_season_schedule
-            (sp_season_id, season_name, play_start, reg_opens, reg_closes)
-        VALUES (%s, %s, %s, %s, %s)
+            (sp_season_id, season_name, play_start, play_end, reg_opens, reg_closes)
+        VALUES (%s, %s, %s, %s, %s, %s)
         ON DUPLICATE KEY UPDATE
             season_name=VALUES(season_name),
             play_start=VALUES(play_start),
+            play_end=VALUES(play_end),
             reg_opens=VALUES(reg_opens),
             reg_closes=VALUES(reg_closes)
     """, (sp_season_id, season["name"], season["play_start"],
-          season["reg_opens"], season["reg_closes"]))
+          season["play_end"], season["reg_opens"], season["reg_closes"]))
 
 
 def get_league_rule(cur, table_id: int) -> str | None:
@@ -162,7 +240,7 @@ def get_league_rule(cur, table_id: int) -> str | None:
     return row[0] if row else None
 
 
-def upsert_registration_period(cur, entity_id: int, sp_season_id: int, season: dict):
+def upsert_registration_period(cur, entity_id: int, sp_season_id: int, season: dict, rule: str = None):
     """Create registration period if one doesn't already exist for this table."""
     cur.execute("""
         SELECT id, status FROM mlbb_registration_periods
@@ -185,7 +263,8 @@ def upsert_registration_period(cur, entity_id: int, sp_season_id: int, season: d
     else:
         status = "scheduled"
 
-    rule = get_league_rule(cur, entity_id)
+    if rule is None:
+        rule = get_league_rule(cur, entity_id)
 
     cur.execute("""
         INSERT INTO mlbb_registration_periods
@@ -223,7 +302,8 @@ def main():
         print(f"\n=== Season: {season['name']} ===")
         desc = (
             f"Play Start: {fmt_date(season['play_start'])}  |  "
-            f"Registration: {fmt_date(season['reg_opens'])} – {fmt_date(season['reg_closes'])}"
+            f"Registration: {fmt_date(season['reg_opens'])} – {fmt_date(season['reg_closes'])}\n\n"
+            f'[mlbb_season_leagues season="{season["slug"]}"]'
         )
         sp_season_id = get_or_create_term("seasons", season["name"], season["slug"], description=desc)
         upsert_season_schedule(cur, sp_season_id, season)
@@ -232,7 +312,16 @@ def main():
             league_name = league_map[league_id]
             table_title = f"{league_name} — {season['name']}"
             table_id = get_or_create_table(table_title, league_id, sp_season_id)
-            upsert_registration_period(cur, table_id, sp_season_id, season)
+
+            # Look up rule from termmeta on the sp_league term directly
+            cur.execute(
+                "SELECT meta_value FROM wp_termmeta WHERE term_id=%s AND meta_key='mlbb_rule'",
+                (league_id,),
+            )
+            rule_row = cur.fetchone()
+            rule = rule_row[0] if rule_row else None
+
+            upsert_registration_period(cur, table_id, sp_season_id, season, rule=rule)
 
     conn.commit()
     cur.close()

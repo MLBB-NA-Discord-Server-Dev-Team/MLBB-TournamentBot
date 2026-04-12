@@ -22,6 +22,8 @@ from services import db, admin_log
 from services.admin_log import Event
 from services.db_helpers import (
     get_player_by_discord_id,
+    forfeit_team_remaining_events,
+    withdraw_team_from_leagues,
     get_captain_team,
     get_captain_teams,
     get_player_active_team_ids,
@@ -33,6 +35,7 @@ from services.db_helpers import (
     setup_team_roster_display,
     get_team_url,
     sync_team_roster_list,
+    get_team_roster_locks,
 )
 from services.sportspress import SportsPressAPI
 
@@ -166,6 +169,19 @@ class Teams(commands.Cog):
             )
             return
 
+
+        # ── Roster lock check ──────────────────────────────────────
+        locks = await get_team_roster_locks(captain["sp_team_id"])
+        if locks:
+            league_names = ", ".join(f"**{l['league_name']}**" for l in locks)
+            await interaction.followup.send(
+                f"❌ **{captain['team_name']}** has a locked roster — "
+                f"registration is closed for: {league_names}.\n"
+                f"Roster changes are not allowed during active league play.",
+                ephemeral=True,
+            )
+            return
+
         invitee_player = await get_player_by_discord_id(invitee_id)
         if not invitee_player:
             await interaction.followup.send(
@@ -244,6 +260,19 @@ class Teams(commands.Cog):
         if not player:
             await interaction.followup.send(
                 "❌ You must register first with `/player register`.", ephemeral=True
+            )
+            return
+
+
+        # ── Roster lock check ──────────────────────────────────────
+        locks = await get_team_roster_locks(invite["sp_team_id"])
+        if locks:
+            league_names = ", ".join(f"**{l['league_name']}**" for l in locks)
+            await interaction.followup.send(
+                f"❌ **{invite['team_name']}** has a locked roster — "
+                f"registration is closed for: {league_names}.\n"
+                f"Roster changes are not allowed during active league play.",
+                ephemeral=True,
             )
             return
 
@@ -336,6 +365,19 @@ class Teams(commands.Cog):
             )
             return
 
+
+        # ── Roster lock check ──────────────────────────────────────
+        locks = await get_team_roster_locks(captain["sp_team_id"])
+        if locks:
+            league_names = ", ".join(f"**{l['league_name']}**" for l in locks)
+            await interaction.followup.send(
+                f"❌ **{captain['team_name']}** has a locked roster — "
+                f"registration is closed for: {league_names}.\n"
+                f"Roster changes are not allowed during active league play.",
+                ephemeral=True,
+            )
+            return
+
         async with db.get_conn() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
@@ -384,6 +426,72 @@ class Teams(commands.Cog):
             "Team": captain["team_name"],
             "Kicked": f"<@{target_id}>",
             "Captain": f"<@{discord_id}>",
+        })
+
+
+    # ── /team withdraw ────────────────────────────────────────────────────
+
+    @team.command(name="withdraw", description="Withdraw your team from all active leagues (forfeits remaining matches)")
+    @app_commands.describe(
+        team_id="Your team ID — required if you captain multiple teams",
+        confirm="Type CONFIRM to proceed (this is irreversible)",
+    )
+    async def team_withdraw(
+        self,
+        interaction: discord.Interaction,
+        confirm: str,
+        team_id: int = None,
+    ):
+        await interaction.response.defer(ephemeral=True)
+        discord_id = str(interaction.user.id)
+
+        if confirm != "CONFIRM":
+            await interaction.followup.send(
+                "\u274c You must type `CONFIRM` to withdraw. This forfeits all remaining matches.",
+                ephemeral=True,
+            )
+            return
+
+        captain_teams = await get_captain_teams(discord_id)
+        if not captain_teams:
+            await interaction.followup.send("\u274c You are not a captain.", ephemeral=True)
+            return
+
+        if team_id is not None:
+            captain = next((t for t in captain_teams if t["sp_team_id"] == team_id), None)
+            if not captain:
+                await interaction.followup.send(f"\u274c You are not the captain of team `{team_id}`.", ephemeral=True)
+                return
+        elif len(captain_teams) == 1:
+            captain = captain_teams[0]
+        else:
+            lines = "\n".join(f"`{t['sp_team_id']}` \u2014 **{t['team_name']}**" for t in captain_teams)
+            await interaction.followup.send(f"\u274c You captain multiple teams. Re-run with `team_id`:\n{lines}", ephemeral=True)
+            return
+
+        # Forfeit remaining matches
+        forfeited = await forfeit_team_remaining_events(captain["sp_team_id"])
+
+        # Withdraw from leagues
+        withdrawn = await withdraw_team_from_leagues(captain["sp_team_id"])
+
+        embed = discord.Embed(
+            title=f"\U0001f6aa {captain['team_name']} Withdrawn",
+            description=(
+                f"**{captain['team_name']}** has been withdrawn from all active leagues.\n"
+                f"\u2022 {forfeited} remaining match(es) forfeited\n"
+                f"\u2022 {withdrawn} league registration(s) withdrawn"
+            ),
+            color=0xE74C3C,
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+        await admin_log.log(interaction.client, Event.SYSTEM, user=interaction.user, fields={
+            "Action": "Team withdrawn",
+            "Team": captain["team_name"],
+            "Team ID": captain["sp_team_id"],
+            "Forfeited matches": forfeited,
+            "Withdrawn registrations": withdrawn,
         })
 
     # ── /team roster ──────────────────────────────────────────────────────

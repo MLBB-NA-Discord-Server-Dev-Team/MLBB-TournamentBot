@@ -17,17 +17,50 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 import config
 from services import db, admin_log
 from services.admin_log import Event
-from services.db_helpers import get_captain_team
+from services.db_helpers import get_captain_team, set_event_results, get_event_team_ids
 from services import match_parser
 from services.match_parser import MatchParseError, WARN_CONFIDENCE
 
 logger = logging.getLogger(__name__)
 
 
-def _notifications_channel(bot: commands.Bot) -> discord.TextChannel | None:
-    if not config.MATCH_NOTIFICATIONS_CHANNEL_ID:
-        return None
-    return bot.get_channel(config.MATCH_NOTIFICATIONS_CHANNEL_ID)
+# Multi-guild broadcast: read data/guilds.json and post to every guild's
+# #match-notifications channel. Falls back to config.MATCH_NOTIFICATIONS_CHANNEL_ID
+# if guilds.json is missing.
+import json
+from pathlib import Path
+
+_GUILDS_FILE = Path(__file__).parent.parent.parent / "data" / "guilds.json"
+
+
+def _get_notification_channel_ids() -> list[int]:
+    if _GUILDS_FILE.exists():
+        try:
+            with open(_GUILDS_FILE) as f:
+                data = json.load(f)
+            ids = [int(g["match_notifications"]) for g in data.get("guilds", []) if g.get("match_notifications")]
+            if ids:
+                return ids
+        except Exception:
+            pass
+    if config.MATCH_NOTIFICATIONS_CHANNEL_ID:
+        return [config.MATCH_NOTIFICATIONS_CHANNEL_ID]
+    return []
+
+
+async def _send_notification(bot: commands.Bot, **send_kwargs) -> bool:
+    """Broadcast a message to all configured match-notifications channels."""
+    sent = False
+    for ch_id in _get_notification_channel_ids():
+        channel = bot.get_channel(ch_id)
+        if not channel:
+            continue
+        try:
+            await channel.send(**send_kwargs)
+            sent = True
+        except Exception as e:
+            logger.warning("Failed to post match notification to %s: %s", ch_id, e)
+    return sent
 
 
 class Match(commands.Cog):
@@ -174,18 +207,17 @@ class Match(commands.Cog):
         )
 
         # Post to #match-notifications
-        notif_channel = _notifications_channel(interaction.client)
-        if notif_channel:
-            await notif_channel.send(embed=embed)
+        await _send_notification(interaction.client, embed=embed)
 
         # Ping admins if low confidence
-        if needs_admin and notif_channel:
+        if needs_admin:
             staff_ping = " ".join(
                 r.mention for r in interaction.guild.roles if r.name in config.ADMIN_ROLES
             )
             if staff_ping:
-                await notif_channel.send(
-                    f"⚠️ Admin review needed for submission `#{submission_id}` — low confidence parse. {staff_ping}"
+                await _send_notification(
+                    interaction.client,
+                    content=f"⚠️ Admin review needed for submission `#{submission_id}` — low confidence parse. {staff_ping}",
                 )
 
         await interaction.followup.send(
@@ -222,7 +254,7 @@ class Match(commands.Cog):
         async with db.get_conn() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    "SELECT id, submitted_by, winning_team_id, battle_id, winner_kills, loser_kills FROM mlbb_match_submissions WHERE id=%s AND status='pending'",
+                    "SELECT id, submitted_by, winning_team_id, battle_id, winner_kills, loser_kills, sp_event_id FROM mlbb_match_submissions WHERE id=%s AND status='pending'",
                     (submission_id,),
                 )
                 row = await cur.fetchone()
@@ -233,7 +265,7 @@ class Match(commands.Cog):
             )
             return
 
-        sub_id, submitted_by, winning_team_id, battle_id, winner_kills, loser_kills = row
+        sub_id, submitted_by, winning_team_id, battle_id, winner_kills, loser_kills, sp_event_id = row
 
         # Can't confirm your own submission
         if submitted_by == discord_id:
@@ -254,6 +286,26 @@ class Match(commands.Cog):
                     (discord_id, submission_id),
                 )
 
+        # ── Auto-record to SportsPress ──────────────────────────────
+        sp_recorded = False
+        if sp_event_id:
+            try:
+                event_teams = await get_event_team_ids(sp_event_id)
+                if event_teams and winning_team_id in event_teams:
+                    losing_team_id = [t for t in event_teams if t != winning_team_id][0]
+                    await set_event_results(
+                        sp_event_id, winning_team_id, losing_team_id,
+                        winner_kills, loser_kills,
+                    )
+                    sp_recorded = True
+                    logger.info(
+                        "Auto-recorded event %d: team %d beat team %d (%d-%d)",
+                        sp_event_id, winning_team_id, losing_team_id,
+                        winner_kills, loser_kills,
+                    )
+            except Exception as e:
+                logger.error("Failed to auto-record event %d: %s", sp_event_id, e)
+
         embed = discord.Embed(
             title="✅ Result Confirmed",
             color=0x2ECC71,
@@ -261,11 +313,11 @@ class Match(commands.Cog):
         embed.add_field(name="Submission", value=f"`#{submission_id}`", inline=True)
         embed.add_field(name="BattleID", value=f"`{battle_id}`", inline=True)
         embed.add_field(name="Score", value=f"**{winner_kills} – {loser_kills}**", inline=True)
+        if sp_recorded:
+            embed.add_field(name="League", value=f"Event `{sp_event_id}` updated", inline=True)
         embed.set_footer(text=f"Confirmed by {interaction.user}")
 
-        notif_channel = _notifications_channel(interaction.client)
-        if notif_channel:
-            await notif_channel.send(embed=embed)
+        await _send_notification(interaction.client, embed=embed)
 
         await interaction.followup.send(
             f"✅ Result `#{submission_id}` confirmed.", ephemeral=True
@@ -335,15 +387,15 @@ class Match(commands.Cog):
         embed.add_field(name="Disputed by", value=str(interaction.user), inline=True)
         embed.add_field(name="Reason", value=reason, inline=False)
 
-        notif_channel = _notifications_channel(interaction.client)
-        if notif_channel:
-            # Ping admins
-            staff_ping = " ".join(
-                r.mention for r in interaction.guild.roles if r.name in config.ADMIN_ROLES
-            )
-            await notif_channel.send(
-                f"{staff_ping}\n" if staff_ping else "", embed=embed
-            )
+        # Ping admins in #match-notifications (broadcast)
+        staff_ping = " ".join(
+            r.mention for r in interaction.guild.roles if r.name in config.ADMIN_ROLES
+        )
+        await _send_notification(
+            interaction.client,
+            content=f"{staff_ping}\n" if staff_ping else "",
+            embed=embed,
+        )
 
         # DM the submitter
         submitter = interaction.guild.get_member(int(row[1]))
@@ -364,6 +416,220 @@ class Match(commands.Cog):
             "Submission ID": f"#{submission_id}",
             "Disputed by": f"<@{interaction.user.id}>",
             "Reason": reason,
+        })
+
+
+
+    # ── /match reschedule ─────────────────────────────────────────────────
+
+    @match_group.command(
+        name="reschedule",
+        description="Request a reschedule for an upcoming match. Opposing captain must confirm.",
+    )
+    @app_commands.describe(
+        event_id="sp_event post ID (from /league schedule)",
+        new_date="New date YYYY-MM-DD (must be Thu-Sun)",
+        new_time="New time HH:MM in 24h PST (must be 19:00-22:00)",
+    )
+    async def match_reschedule(
+        self,
+        interaction: discord.Interaction,
+        event_id: int,
+        new_date: str,
+        new_time: str,
+    ):
+        await interaction.response.defer(ephemeral=True)
+        from datetime import datetime, timezone, timedelta
+        try:
+            from zoneinfo import ZoneInfo
+        except ImportError:
+            from backports.zoneinfo import ZoneInfo
+
+        discord_id = str(interaction.user.id)
+
+        captain = await get_captain_team(discord_id)
+        if not captain:
+            await interaction.followup.send(
+                "❌ Only team captains can reschedule matches.", ephemeral=True
+            )
+            return
+
+        # Validate date/time
+        try:
+            pst = ZoneInfo(config.MATCH_WINDOW_TZ)
+            dt_pst = datetime.strptime(f"{new_date} {new_time}", "%Y-%m-%d %H:%M").replace(tzinfo=pst)
+        except Exception:
+            await interaction.followup.send(
+                "❌ Invalid date/time. Use `YYYY-MM-DD` and `HH:MM` (24h, PST).",
+                ephemeral=True,
+            )
+            return
+
+        # Weekday check (Mon=0, Sun=6)
+        if dt_pst.weekday() not in (3, 4, 5, 6):  # Thu-Sun
+            await interaction.followup.send(
+                "❌ Matches must be scheduled Thursday through Sunday.",
+                ephemeral=True,
+            )
+            return
+
+        # Time window check (7-10 PM PST so match can finish by 11)
+        if not (config.MATCH_WINDOW_START_HOUR <= dt_pst.hour < config.MATCH_WINDOW_END_HOUR):
+            await interaction.followup.send(
+                f"❌ Match start must be between {config.MATCH_WINDOW_START_HOUR}:00 "
+                f"and {config.MATCH_WINDOW_END_HOUR - 1}:59 PST.",
+                ephemeral=True,
+            )
+            return
+
+        # Not in the past
+        if dt_pst < datetime.now(pst) + timedelta(hours=1):
+            await interaction.followup.send(
+                "❌ New time must be at least 1 hour in the future.",
+                ephemeral=True,
+            )
+            return
+
+        # Verify the captain's team is a participant in this event
+        from services.db_helpers import get_event_team_ids
+        team_ids = await get_event_team_ids(event_id)
+        if captain["sp_team_id"] not in team_ids:
+            await interaction.followup.send(
+                f"❌ Your team is not a participant in event `{event_id}`.",
+                ephemeral=True,
+            )
+            return
+
+        # Store reschedule request (in UTC)
+        dt_utc = dt_pst.astimezone(timezone.utc).replace(tzinfo=None)
+        async with db.get_conn() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    INSERT INTO mlbb_reschedule_requests
+                        (sp_event_id, requested_by, new_datetime, status)
+                    VALUES (%s, %s, %s, 'pending')
+                    """,
+                    (event_id, discord_id, dt_utc),
+                )
+                req_id = cur.lastrowid
+
+        # Find opponent
+        opponent_id = [t for t in team_ids if t != captain["sp_team_id"]][0]
+
+        embed = discord.Embed(
+            title="🔄 Reschedule Requested",
+            description=(
+                f"**{captain['team_name']}** has proposed a new time for event `{event_id}`.\n"
+                f"**New time:** {dt_pst.strftime('%A, %b %d %I:%M %p %Z')}\n\n"
+                f"Opposing captain: use `/match reschedule-confirm request_id:{req_id}` to accept."
+            ),
+            color=0xFFB703,
+        )
+
+        await _send_notification(interaction.client, embed=embed)
+
+        await interaction.followup.send(
+            f"✅ Reschedule request `#{req_id}` submitted. Waiting on opposing captain.",
+            ephemeral=True,
+        )
+
+        await admin_log.log(interaction.client, Event.SYSTEM, user=interaction.user, fields={
+            "Action": "Reschedule requested",
+            "Request ID": f"#{req_id}",
+            "Event ID": event_id,
+            "Requesting team": captain["team_name"],
+            "New time": dt_pst.strftime("%Y-%m-%d %H:%M %Z"),
+        })
+
+    # ── /match reschedule-confirm ─────────────────────────────────────────
+
+    @match_group.command(
+        name="reschedule-confirm",
+        description="Opposing captain: confirm a reschedule request",
+    )
+    @app_commands.describe(request_id="Reschedule request ID from the notification")
+    async def match_reschedule_confirm(
+        self, interaction: discord.Interaction, request_id: int,
+    ):
+        await interaction.response.defer(ephemeral=True)
+        discord_id = str(interaction.user.id)
+
+        captain = await get_captain_team(discord_id)
+        if not captain:
+            await interaction.followup.send(
+                "❌ Only team captains can confirm reschedules.", ephemeral=True
+            )
+            return
+
+        async with db.get_conn() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT sp_event_id, requested_by, new_datetime, status FROM mlbb_reschedule_requests WHERE id=%s",
+                    (request_id,),
+                )
+                row = await cur.fetchone()
+
+        if not row:
+            await interaction.followup.send(f"❌ Request `#{request_id}` not found.", ephemeral=True)
+            return
+
+        sp_event_id, requested_by, new_dt, status = row
+
+        if status != "pending":
+            await interaction.followup.send(f"❌ Request `#{request_id}` is already {status}.", ephemeral=True)
+            return
+
+        if requested_by == discord_id:
+            await interaction.followup.send(
+                "❌ You can't confirm your own reschedule request.", ephemeral=True
+            )
+            return
+
+        from services.db_helpers import get_event_team_ids
+        team_ids = await get_event_team_ids(sp_event_id)
+        if captain["sp_team_id"] not in team_ids:
+            await interaction.followup.send(
+                "❌ Your team is not a participant in that event.", ephemeral=True
+            )
+            return
+
+        # Update the sp_event post_date directly via MySQL
+        async with db.get_conn() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE wp_posts SET post_date=%s, post_date_gmt=%s WHERE ID=%s AND post_type='sp_event'",
+                    (new_dt, new_dt, sp_event_id),
+                )
+                await cur.execute(
+                    "UPDATE mlbb_reschedule_requests SET status='accepted', resolved_at=NOW() WHERE id=%s",
+                    (request_id,),
+                )
+
+        # Invalidate any pending Discord event — the next scheduler tick will re-create it
+        async with db.get_conn() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE mlbb_discord_events SET status='cancelled' WHERE match_schedule_id=%s AND status='scheduled'",
+                    (sp_event_id,),
+                )
+
+        embed = discord.Embed(
+            title="✅ Reschedule Confirmed",
+            description=f"Event `{sp_event_id}` moved to **{new_dt.strftime('%b %d, %Y %H:%M UTC')}**",
+            color=0x2ECC71,
+        )
+        await _send_notification(interaction.client, embed=embed)
+
+        await interaction.followup.send(
+            f"✅ Reschedule `#{request_id}` confirmed. Event updated.", ephemeral=True
+        )
+
+        await admin_log.log(interaction.client, Event.SYSTEM, user=interaction.user, fields={
+            "Action": "Reschedule confirmed",
+            "Request ID": f"#{request_id}",
+            "Event ID": sp_event_id,
+            "New time (UTC)": str(new_dt),
         })
 
 

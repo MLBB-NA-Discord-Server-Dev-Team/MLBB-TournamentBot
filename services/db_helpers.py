@@ -646,36 +646,15 @@ async def get_season_for_period(period_id: int) -> Optional[dict]:
 
 
 async def get_play_end_for_season(sp_season_id: int) -> Optional:
-    """Derive play_end as the next season's play_start, or play_start + 90 days."""
-    from datetime import timedelta
+    """Return play_end date for a season from mlbb_season_schedule."""
     async with db.get_conn() as conn:
         async with conn.cursor() as cur:
-            # Get this season's play_start
             await cur.execute(
-                "SELECT play_start FROM mlbb_season_schedule WHERE sp_season_id = %s",
+                "SELECT play_end FROM mlbb_season_schedule WHERE sp_season_id = %s",
                 (sp_season_id,),
             )
             row = await cur.fetchone()
-            if not row:
-                return None
-            play_start = row[0]
-
-            # Find next season's play_start
-            await cur.execute(
-                """
-                SELECT play_start FROM mlbb_season_schedule
-                WHERE play_start > %s
-                ORDER BY play_start ASC
-                LIMIT 1
-                """,
-                (play_start,),
-            )
-            next_row = await cur.fetchone()
-            if next_row:
-                # End 1 day before next season starts
-                return next_row[0] - timedelta(days=1)
-            else:
-                return play_start + timedelta(days=89)
+            return row[0] if row else None
 
 
 # ── SportsPress post listings (direct MySQL — no HTTP overhead) ────────────
@@ -852,3 +831,401 @@ async def get_current_season() -> dict | None:
             )
             row = await cur.fetchone()
             return {"sp_season_id": row[0], "season_name": row[1]} if row else None
+
+
+# ── Roster lock ──────────────────────────────────────────────────────────
+
+async def get_team_roster_locks(sp_team_id: int) -> list[dict]:
+    """
+    Return closed registration periods where this team is approved.
+    A non-empty result means the team's roster is locked.
+    Returns [{period_id, entity_id, league_name, rule}].
+    """
+    async with db.get_conn() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                SELECT rp.id, rp.entity_id, p.post_title, rp.rule
+                FROM mlbb_team_registrations tr
+                JOIN mlbb_registration_periods rp ON rp.id = tr.period_id
+                JOIN wp_posts p ON p.ID = rp.entity_id
+                WHERE tr.sp_team_id = %s
+                  AND tr.status = 'approved'
+                  AND rp.status = 'closed'
+                """,
+                (sp_team_id,),
+            )
+            rows = await cur.fetchall()
+    return [
+        {"period_id": r[0], "entity_id": r[1], "league_name": r[2], "rule": r[3]}
+        for r in rows
+    ]
+
+
+async def get_event_team_ids(sp_event_id: int) -> list[int]:
+    """Return the team IDs assigned to an sp_event post (via sp_team postmeta)."""
+    async with db.get_conn() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT meta_value FROM wp_postmeta WHERE post_id=%s AND meta_key='sp_team'",
+                (sp_event_id,),
+            )
+            rows = await cur.fetchall()
+    return [int(r[0]) for r in rows if r[0]]
+
+
+async def get_future_events_for_team(sp_team_id: int) -> list[dict]:
+    """Return future sp_event posts where this team is a participant."""
+    async with db.get_conn() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                SELECT p.ID, p.post_title, p.post_date
+                FROM wp_posts p
+                JOIN wp_postmeta pm ON pm.post_id = p.ID AND pm.meta_key = 'sp_team'
+                WHERE p.post_type = 'sp_event'
+                  AND p.post_status = 'future'
+                  AND pm.meta_value = %s
+                ORDER BY p.post_date ASC
+                """,
+                (str(sp_team_id),),
+            )
+            rows = await cur.fetchall()
+    return [{"id": r[0], "title": r[1], "date": r[2]} for r in rows]
+
+
+async def get_all_league_events(league_term_id: int, season_id: int = None) -> list[dict]:
+    """Return all sp_event posts for a league (optionally filtered by season)."""
+    async with db.get_conn() as conn:
+        async with conn.cursor() as cur:
+            query = """
+                SELECT p.ID, p.post_title, p.post_date, p.post_status
+                FROM wp_posts p
+                JOIN wp_term_relationships wtr ON wtr.object_id = p.ID
+                JOIN wp_term_taxonomy wtt ON wtt.term_taxonomy_id = wtr.term_taxonomy_id
+                WHERE p.post_type = 'sp_event'
+                  AND wtt.taxonomy = 'sp_league'
+                  AND wtt.term_id = %s
+            """
+            params = [league_term_id]
+            if season_id:
+                query += """
+                  AND EXISTS (
+                      SELECT 1 FROM wp_term_relationships wtr2
+                      JOIN wp_term_taxonomy wtt2 ON wtt2.term_taxonomy_id = wtr2.term_taxonomy_id
+                      WHERE wtr2.object_id = p.ID AND wtt2.taxonomy = 'sp_season' AND wtt2.term_id = %s
+                  )
+                """
+                params.append(season_id)
+            query += " ORDER BY p.post_date ASC"
+            await cur.execute(query, params)
+            rows = await cur.fetchall()
+    return [{"id": r[0], "title": r[1], "date": r[2], "status": r[3]} for r in rows]
+
+
+async def get_league_standings(league_term_id: int, season_id: int = None) -> list[dict]:
+    """
+    Calculate W/L/D standings for a league by reading sp_results from published events.
+    Returns sorted list of [{team_id, team_name, wins, losses, draws, points, played}].
+    """
+    import phpserialize
+    events = await get_all_league_events(league_term_id, season_id)
+    published = [e for e in events if e["status"] == "publish"]
+
+    team_stats = {}  # team_id -> {wins, losses, draws}
+
+    for event in published:
+        async with db.get_conn() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT meta_value FROM wp_postmeta WHERE post_id=%s AND meta_key='sp_results'",
+                    (event["id"],),
+                )
+                row = await cur.fetchone()
+        if not row or not row[0]:
+            continue
+        try:
+            results = phpserialize.loads(row[0].encode(), decode_strings=True)
+        except Exception:
+            continue
+
+        for team_id_str, data in results.items():
+            team_id = int(team_id_str) if isinstance(team_id_str, str) else team_id_str
+            if team_id not in team_stats:
+                team_stats[team_id] = {"wins": 0, "losses": 0, "draws": 0}
+            outcomes = data.get("outcome", [])
+            if isinstance(outcomes, list):
+                for o in outcomes:
+                    if o == "win":
+                        team_stats[team_id]["wins"] += 1
+                    elif o == "loss":
+                        team_stats[team_id]["losses"] += 1
+                    elif o == "draw":
+                        team_stats[team_id]["draws"] += 1
+
+    # Get team names
+    standings = []
+    for team_id, stats in team_stats.items():
+        async with db.get_conn() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT post_title FROM wp_posts WHERE ID=%s", (team_id,)
+                )
+                row = await cur.fetchone()
+        team_name = row[0] if row else f"Team {team_id}"
+        played = stats["wins"] + stats["losses"] + stats["draws"]
+        points = stats["wins"] * 3 + stats["draws"]
+        standings.append({
+            "team_id": team_id,
+            "team_name": team_name,
+            "wins": stats["wins"],
+            "losses": stats["losses"],
+            "draws": stats["draws"],
+            "played": played,
+            "points": points,
+        })
+
+    standings.sort(key=lambda x: (-x["points"], -(x["wins"] - x["losses"]), x["team_name"]))
+    return standings
+
+
+async def get_overdue_events(hours_past: int = 48) -> list[dict]:
+    """
+    Return future sp_events whose scheduled date is more than hours_past hours ago
+    and still have status='future' (no result submitted).
+    """
+    async with db.get_conn() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                SELECT p.ID, p.post_title, p.post_date
+                FROM wp_posts p
+                WHERE p.post_type = 'sp_event'
+                  AND p.post_status = 'future'
+                  AND p.post_date < DATE_SUB(NOW(), INTERVAL %s HOUR)
+                ORDER BY p.post_date ASC
+                """,
+                (hours_past,),
+            )
+            rows = await cur.fetchall()
+    return [{"id": r[0], "title": r[1], "date": r[2]} for r in rows]
+
+
+async def get_upcoming_events(hours_ahead: int = 24) -> list[dict]:
+    """Return future sp_events within the next hours_ahead hours."""
+    async with db.get_conn() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                SELECT p.ID, p.post_title, p.post_date
+                FROM wp_posts p
+                WHERE p.post_type = 'sp_event'
+                  AND p.post_status = 'future'
+                  AND p.post_date BETWEEN NOW() AND DATE_ADD(NOW(), INTERVAL %s HOUR)
+                ORDER BY p.post_date ASC
+                """,
+                (hours_ahead,),
+            )
+            rows = await cur.fetchall()
+    return [{"id": r[0], "title": r[1], "date": r[2]} for r in rows]
+
+
+async def get_leagues_with_closed_periods() -> list[dict]:
+    """Return leagues (term_id, table_id, name) that have closed registration periods."""
+    async with db.get_conn() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                SELECT DISTINCT rp.entity_id, p.post_title, rp.sp_season_id
+                FROM mlbb_registration_periods rp
+                JOIN wp_posts p ON p.ID = rp.entity_id
+                WHERE rp.entity_type = 'league'
+                  AND rp.status = 'closed'
+                  AND rp.sp_season_id IS NOT NULL
+                """
+            )
+            rows = await cur.fetchall()
+    return [{"table_id": r[0], "league_name": r[1], "sp_season_id": r[2]} for r in rows]
+
+
+async def forfeit_team_remaining_events(sp_team_id: int) -> int:
+    """
+    Forfeit all future events for a team (set result to 0-3 loss).
+    Returns count of forfeited events.
+    """
+    events = await get_future_events_for_team(sp_team_id)
+    forfeited = 0
+    for event in events:
+        team_ids = await get_event_team_ids(event["id"])
+        if len(team_ids) != 2:
+            continue
+        opponent_id = [t for t in team_ids if t != sp_team_id]
+        if not opponent_id:
+            continue
+        opponent_id = opponent_id[0]
+        try:
+            # Forfeit: opponent wins 3-0
+            await set_event_results(event["id"], opponent_id, sp_team_id, 3, 0)
+            forfeited += 1
+        except Exception:
+            pass
+    return forfeited
+
+
+async def get_teams_below_minimum_roster(min_size: int = 5) -> list[dict]:
+    """
+    Return teams that are registered in active (closed) leagues but have
+    fewer than min_size active roster members.
+    """
+    async with db.get_conn() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                SELECT DISTINCT tr.sp_team_id, p.post_title,
+                    (SELECT COUNT(*) FROM mlbb_player_roster r
+                     WHERE r.sp_team_id = tr.sp_team_id AND r.status = 'active') AS roster_count
+                FROM mlbb_team_registrations tr
+                JOIN mlbb_registration_periods rp ON rp.id = tr.period_id
+                JOIN wp_posts p ON p.ID = tr.sp_team_id
+                WHERE tr.status = 'approved'
+                  AND rp.status = 'closed'
+                HAVING roster_count < %s
+                """,
+                (min_size,),
+            )
+            rows = await cur.fetchall()
+    return [{"sp_team_id": r[0], "team_name": r[1], "roster_count": r[2]} for r in rows]
+
+
+async def withdraw_team_from_leagues(sp_team_id: int) -> int:
+    """
+    Mark all approved registrations for a team as 'withdrawn'.
+    Returns count of withdrawals.
+    """
+    async with db.get_conn() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                UPDATE mlbb_team_registrations
+                SET status = 'withdrawn', reviewed_at = NOW(), reviewed_by = 'system'
+                WHERE sp_team_id = %s AND status = 'approved'
+                """,
+                (sp_team_id,),
+            )
+            return cur.rowcount
+
+
+async def create_voice_channel_record(sp_event_id: int, channel_id: str, channel_name: str) -> int:
+    """Record a created voice channel in mlbb_voice_channels."""
+    async with db.get_conn() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                INSERT INTO mlbb_voice_channels (match_schedule_id, channel_id, channel_name)
+                VALUES (%s, %s, %s)
+                """,
+                (sp_event_id, channel_id, channel_name),
+            )
+            return cur.lastrowid
+
+
+async def get_active_voice_channels() -> list[dict]:
+    """Return voice channels that haven't been deleted yet."""
+    async with db.get_conn() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                SELECT vc.id, vc.match_schedule_id, vc.channel_id, vc.channel_name, vc.created_at
+                FROM mlbb_voice_channels vc
+                WHERE vc.deleted_at IS NULL
+                """
+            )
+            rows = await cur.fetchall()
+    return [
+        {"id": r[0], "sp_event_id": r[1], "channel_id": r[2],
+         "channel_name": r[3], "created_at": r[4]}
+        for r in rows
+    ]
+
+
+async def mark_voice_channel_deleted(record_id: int) -> None:
+    """Mark a voice channel record as deleted."""
+    async with db.get_conn() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "UPDATE mlbb_voice_channels SET deleted_at = NOW() WHERE id = %s",
+                (record_id,),
+            )
+
+
+async def apply_standings_table_meta(sp_table_id: int) -> None:
+    """
+    Set the standard SportsPress postmeta on an sp_table post so it renders
+    as a full standings table with Pos | Team | Wins | Losses | Win %.
+
+    This must be called after api.create_table() because the REST API does
+    not accept these meta fields directly.
+    """
+    import phpserialize
+
+    # Serialized values
+    sp_event_status = phpserialize.dumps({0: b"publish", 1: b"future"}).decode()
+    sp_columns = phpserialize.dumps({
+        0: b"wins", 1: b"losses", 2: b"winrate"
+    }).decode()
+    empty_array = phpserialize.dumps({}).decode()
+
+    meta_pairs = [
+        ("sp_mode", "team"),
+        ("sp_format", "standings"),
+        ("sp_caption", ""),
+        ("sp_date", "0"),
+        ("sp_date_from", "2024-01-14"),
+        ("sp_date_to", "2024-01-14"),
+        ("sp_date_past", "7"),
+        ("sp_date_relative", "0"),
+        ("sp_main_league", ""),
+        ("sp_current_season", ""),
+        ("sp_select", "manual"),
+        ("sp_orderby", "wins"),
+        ("sp_order", "DESC"),
+        ("sp_event_status", sp_event_status),
+        ("sp_highlight", "0"),
+        ("sp_columns", sp_columns),
+        ("sp_adjustments", empty_array),
+        ("sp_teams", empty_array),
+        ("sp_highlight_places", "NULL"),
+    ]
+
+    async with db.get_conn() as conn:
+        async with conn.cursor() as cur:
+            for meta_key, meta_value in meta_pairs:
+                await cur.execute(
+                    "DELETE FROM wp_postmeta WHERE post_id=%s AND meta_key=%s",
+                    (sp_table_id, meta_key),
+                )
+                await cur.execute(
+                    "INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (%s, %s, %s)",
+                    (sp_table_id, meta_key, meta_value),
+                )
+
+
+async def populate_table_teams(sp_table_id: int, team_ids: list[int]) -> None:
+    """
+    Write sp_team postmeta rows on an sp_table post so SportsPress can render
+    the standings. Call this whenever teams are added to a league.
+    sp_select must be 'manual' for SP to read these rows.
+    """
+    async with db.get_conn() as conn:
+        async with conn.cursor() as cur:
+            # Clear existing sp_team rows for this table
+            await cur.execute(
+                "DELETE FROM wp_postmeta WHERE post_id=%s AND meta_key='sp_team'",
+                (sp_table_id,),
+            )
+            # Insert one row per team
+            for tid in team_ids:
+                await cur.execute(
+                    "INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (%s, 'sp_team', %s)",
+                    (sp_table_id, str(tid)),
+                )

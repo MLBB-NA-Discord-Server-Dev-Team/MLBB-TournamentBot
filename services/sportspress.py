@@ -140,13 +140,30 @@ class SportsPressAPI:
     async def create_table(
         self, name: str, description: str = "",
         league_ids: List[int] = None, season_ids: List[int] = None,
+        apply_standings_meta: bool = True,
     ) -> Dict:
+        """
+        Create an sp_table post. By default, also applies standard SportsPress
+        standings metadata (sp_format=standings, sp_columns=wins/losses/winrate,
+        etc.) so the table renders properly on its public page.
+        """
         data: Dict = {"title": name, "content": description, "status": "publish"}
         if league_ids:
             data["leagues"] = league_ids
         if season_ids:
             data["seasons"] = season_ids
-        return await self._post("tables", data)
+        result = await self._post("tables", data)
+        if apply_standings_meta and result and "id" in result:
+            # Import here to avoid circular imports at module load time
+            from services.db_helpers import apply_standings_table_meta
+            try:
+                await apply_standings_table_meta(result["id"])
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Failed to apply standings meta to table %s: %s", result["id"], e
+                )
+        return result
 
     async def create_page(self, title: str, content: str, slug: str) -> Dict:
         """Create a standard WordPress page via wp/v2/pages."""
@@ -177,7 +194,27 @@ class SportsPressAPI:
             data["leagues"] = league_ids
         if season_ids:
             data["seasons"] = season_ids
-        return await self._post("events", data)
+        result = await self._post("events", data)
+        # Set sp_format='league' via direct MySQL so SP League Table counts this event
+        if result and "id" in result:
+            try:
+                from services import db
+                async with db.get_conn() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute(
+                            "DELETE FROM wp_postmeta WHERE post_id=%s AND meta_key='sp_format'",
+                            (result["id"],),
+                        )
+                        await cur.execute(
+                            "INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (%s, 'sp_format', 'league')",
+                            (result["id"],),
+                        )
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Failed to set sp_format on event %s: %s", result["id"], e
+                )
+        return result
 
     async def delete_event(self, post_id: int) -> Dict:
         return await self._delete(f"events/{post_id}")

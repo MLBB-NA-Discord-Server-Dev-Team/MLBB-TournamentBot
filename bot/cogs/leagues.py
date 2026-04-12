@@ -13,7 +13,9 @@ from services.sportspress import SportsPressAPI
 from services import db
 from services.db_helpers import (
     list_leagues, get_captain_team, get_captain_teams,
+    get_player_by_discord_id, get_roster,
     set_league_termmeta, get_current_season, get_existing_table_for_league,
+    apply_standings_table_meta,
 )
 
 logger = logging.getLogger(__name__)
@@ -172,6 +174,8 @@ class Leagues(commands.Cog):
                     season_ids=[season['sp_season_id']],
                 )
                 table_id = table['id']
+                # Apply standard standings metadata so the table renders properly
+                await apply_standings_table_meta(table_id)
             except Exception as e:
                 logger.warning("Could not create sp_table for custom league: %s", e)
 
@@ -217,8 +221,8 @@ class Leagues(commands.Cog):
             f'</tbody></table>'
             '<p>See the <a href="/general-rules/">General Rules</a> for '
             'sportsmanship guidelines, disconnect policies, and scheduling definitions.</p>'
-            '<h2>Current Season Registration</h2>'
-            f'[mlbb_league_list search="{name}"]'
+            '<h2>Seasons &amp; Standings</h2>'
+            f'[mlbb_league_seasons search="{name}"]'
             f'\n[mlbb_league_register_help search="{name}"]'
         )
         page_url = ''
@@ -278,6 +282,79 @@ class Leagues(commands.Cog):
         await interaction.response.defer(ephemeral=True)
         discord_id = str(interaction.user.id)
 
+        # ── FreePlay branch: individual signup ────────────────────────────
+        async with db.get_conn() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    SELECT id, rule FROM mlbb_registration_periods
+                    WHERE entity_type='league' AND entity_id=%s
+                      AND status='open' AND opens_at <= NOW() AND closes_at > NOW()
+                    LIMIT 1
+                    """,
+                    (league_id,),
+                )
+                period_row = await cur.fetchone()
+
+        if period_row and period_row[1] == "FreePlay":
+            period_id = period_row[0]
+            # Must be a registered player
+            player = await get_player_by_discord_id(discord_id)
+            if not player:
+                await interaction.followup.send(
+                    "\u274c You must register first with `/player register`.", ephemeral=True
+                )
+                return
+
+            async with db.get_conn() as conn:
+                async with conn.cursor() as cur:
+                    # Already in pool?
+                    await cur.execute(
+                        "SELECT id FROM mlbb_free_play_pool WHERE period_id=%s AND discord_id=%s",
+                        (period_id, discord_id),
+                    )
+                    if await cur.fetchone():
+                        await interaction.followup.send(
+                            "\u274c You are already signed up for this Free Play league.",
+                            ephemeral=True,
+                        )
+                        return
+
+                    await cur.execute(
+                        """
+                        INSERT INTO mlbb_free_play_pool (period_id, discord_id, sp_player_id)
+                        VALUES (%s, %s, %s)
+                        """,
+                        (period_id, discord_id, player["id"]),
+                    )
+                    # Count current pool size
+                    await cur.execute(
+                        "SELECT COUNT(*) FROM mlbb_free_play_pool WHERE period_id=%s",
+                        (period_id,),
+                    )
+                    pool_size = (await cur.fetchone())[0]
+
+            embed = discord.Embed(
+                title="\u2705 Free Play Signup Confirmed",
+                description=(
+                    f"You are in the pool for league `{league_id}`.\n"
+                    f"Current pool size: **{pool_size}** player(s)\n\n"
+                    "Teams will be randomly assigned when registration closes. "
+                    "Use `/league leave-free-play` to withdraw before then."
+                ),
+                color=0x2ECC71,
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+            await admin_log.log(interaction.client, Event.SYSTEM, user=interaction.user, fields={
+                "Action": "Free Play signup",
+                "Player": player["title"],
+                "League ID": league_id,
+                "Pool size": pool_size,
+            })
+            return
+
+        # ── Standard (captain) branch ─────────────────────────────────────
         captain_teams = await get_captain_teams(discord_id)
         if not captain_teams:
             await interaction.followup.send(
@@ -401,17 +478,17 @@ class Leagues(commands.Cog):
                     """
                     INSERT INTO mlbb_team_registrations
                         (period_id, sp_team_id, registered_by, status)
-                    VALUES (%s, %s, %s, 'pending')
+                    VALUES (%s, %s, %s, 'approved')
                     """,
                     (period_id, captain["sp_team_id"], discord_id),
                 )
 
         embed = discord.Embed(
-            title="📋 Registration Submitted",
-            description=f"**{captain['team_name']}** has been registered for league `{league_id}`.",
+            title="✅ Registration Approved",
+            description=f"**{captain['team_name']}** has been registered and auto-approved for league `{league_id}`.",
             color=0x3A86FF,
         )
-        embed.set_footer(text="An organizer will review and approve your registration.")
+        embed.set_footer(text="Your team is locked in. Roster changes are frozen once registration closes.")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
 
@@ -521,6 +598,50 @@ class Leagues(commands.Cog):
             text="play.mlbb.site · /tournament help for a full command reference · /player register to begin"
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+
+    @league.command(name="leave-free-play", description="Withdraw from a Free Play league pool before it closes")
+    @app_commands.describe(league_id="League post ID")
+    async def league_leave_free_play(
+        self, interaction: discord.Interaction, league_id: int
+    ):
+        await interaction.response.defer(ephemeral=True)
+        discord_id = str(interaction.user.id)
+
+        async with db.get_conn() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    SELECT rp.id FROM mlbb_registration_periods rp
+                    WHERE rp.entity_type='league' AND rp.entity_id=%s
+                      AND rp.status='open' AND rp.rule='FreePlay'
+                    LIMIT 1
+                    """,
+                    (league_id,),
+                )
+                row = await cur.fetchone()
+                if not row:
+                    await interaction.followup.send(
+                        "\u274c No open Free Play registration for this league.", ephemeral=True
+                    )
+                    return
+                period_id = row[0]
+                await cur.execute(
+                    "DELETE FROM mlbb_free_play_pool WHERE period_id=%s AND discord_id=%s",
+                    (period_id, discord_id),
+                )
+                removed = cur.rowcount
+
+        if removed:
+            await interaction.followup.send(
+                f"\u2705 You have been removed from the Free Play pool for league `{league_id}`.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.followup.send(
+                "\u274c You were not in the pool for this league.", ephemeral=True
+            )
 
 
 async def setup(bot: commands.Bot):
