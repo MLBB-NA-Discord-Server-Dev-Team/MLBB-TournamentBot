@@ -3,8 +3,9 @@ scripts/season_init.py
 Initializes seasons, lore leagues, standings tables, and registration periods
 for the MLBB Tournament system.
 
-Each league runs on its own staggered annual cycle defined by LEAGUE_MONTH_SLOT.
-Registration opens REG_LEAD_DAYS before each league's play start.
+Seasons run every SEASON_INTERVAL days from SEASON_ZERO. Within a season,
+registration is staggered by FORMAT_GROUPS (BO5, then BO3, Brawl, FreePlay one
+week apart); each group's play starts when its registration window closes.
 Run via cron to keep the registration buffer fresh. Idempotent — safe to re-run.
 """
 import sys

@@ -196,6 +196,20 @@ class AutonomousSim:
         self.notify_channels = self._load_notify_channels()
         self.report = SimReport()
 
+        # Tracking
+        self.teams: List[dict] = []
+        self._id_counter = 0
+        self._player_ids: List[int] = []
+        self._team_ids: List[int] = []
+        self._event_ids: List[int] = []
+        self._table_ids: List[int] = []
+        self._league_term_id: Optional[int] = None
+        self._period_id: Optional[int] = None
+        self._page_ids: List[int] = []
+        self._fake_ids: List[str] = []
+        self._reg_ids: List[int] = []
+        self._sub_ids: List[int] = []
+
     def _load_notify_channels(self) -> List[int]:
         import json
         from pathlib import Path
@@ -214,20 +228,6 @@ class AutonomousSim:
         if config.ADMIN_LOG_CHANNEL_ID:
             return [config.ADMIN_LOG_CHANNEL_ID]
         return []
-
-        # Tracking
-        self.teams: List[dict] = []
-        self._id_counter = 0
-        self._player_ids: List[int] = []
-        self._team_ids: List[int] = []
-        self._event_ids: List[int] = []
-        self._table_ids: List[int] = []
-        self._league_term_id: Optional[int] = None
-        self._period_id: Optional[int] = None
-        self._page_ids: List[int] = []
-        self._fake_ids: List[str] = []
-        self._reg_ids: List[int] = []
-        self._sub_ids: List[int] = []
 
     def _fake_id(self) -> str:
         fid = str(_FAKE_BASE + self._id_counter)
