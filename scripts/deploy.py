@@ -7,7 +7,7 @@ Runs 7 phases in order:
   2. Database setup (migrate.py + schema verification)
   3. WordPress infrastructure (league_pages.py + season_init.py)
   4. Systemd service (install, enable, restart, verify Scheduler started)
-  5. Cron jobs (persistent_league + autonomous_sim)
+  5. Cron jobs (persistent_league + autonomous_sim + season_init)
   6. Log rotation (/etc/logrotate.d/mlbb-tournament-bot)
   7. Post-install verification
 
@@ -56,6 +56,10 @@ def fail(msg: str):
 
 def skip(msg: str):
     print(f"  {_color('[SKIP]', YELLOW)} {msg}")
+
+
+def warn(msg: str):
+    print(f"  {_color('[WARN]', YELLOW)} {msg}")
 
 
 def info(msg: str):
@@ -430,6 +434,10 @@ WantedBy=multi-user.target
             f"0 4 * * * cd {self.install_path} && "
             f"venv/bin/python scripts/autonomous_sim.py >> /var/log/mlbb-autosim.log 2>&1"
         )
+        season_line = (
+            f"0 6 1 * * cd {self.install_path} && "
+            f"venv/bin/python scripts/season_init.py >> /var/log/mlbb-season-init.log 2>&1"
+        )
 
         r = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
         current = r.stdout if r.returncode == 0 else ""
@@ -449,6 +457,20 @@ WantedBy=multi-user.target
             added.append("autonomous_sim")
         else:
             ok("autonomous_sim cron already present")
+
+        if "season_init.py" not in current:
+            new_content += "\n# MLBB Tournament: monthly season/registration buffer refresh (1st, 06:00 UTC)\n"
+            new_content += season_line + "\n"
+            added.append("season_init")
+        else:
+            ok("season_init cron already present")
+
+        # Registration open/close is handled by the bot's Scheduler (every 60s).
+        # Legacy raw-SQL cron jobs that flip mlbb_registration_periods.status race
+        # with it and cause schedule generation to be skipped.
+        if "mlbb_registration_periods SET status" in current:
+            warn("Legacy registration open/close cron jobs found -- remove them; "
+                 "the bot's Scheduler handles these transitions")
 
         if added:
             proc = subprocess.run(["crontab", "-"], input=new_content, text=True,
