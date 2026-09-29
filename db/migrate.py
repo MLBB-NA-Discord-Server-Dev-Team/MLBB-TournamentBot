@@ -42,16 +42,21 @@ TABLES = [
         "mlbb_registration_periods",
         """
         CREATE TABLE IF NOT EXISTS mlbb_registration_periods (
-            id            INT AUTO_INCREMENT PRIMARY KEY,
-            entity_type   ENUM('tournament','league') NOT NULL,
-            entity_id     BIGINT UNSIGNED NOT NULL,
-            sp_season_id  INT UNSIGNED DEFAULT NULL,
-            opens_at      DATETIME NOT NULL,
-            closes_at     DATETIME DEFAULT NULL,
-            max_teams     SMALLINT UNSIGNED DEFAULT NULL,
-            created_by    VARCHAR(20) NOT NULL DEFAULT 'system',
-            status        ENUM('scheduled','open','closed') DEFAULT 'scheduled',
-            created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+            id                   INT AUTO_INCREMENT PRIMARY KEY,
+            entity_type          ENUM('tournament','league') NOT NULL,
+            entity_id            BIGINT UNSIGNED NOT NULL,
+            sp_season_id         INT UNSIGNED DEFAULT NULL,
+            opens_at             DATETIME NOT NULL,
+            closes_at            DATETIME DEFAULT NULL,
+            play_start           DATE DEFAULT NULL,
+            play_end             DATE DEFAULT NULL,
+            max_teams            SMALLINT UNSIGNED DEFAULT NULL,
+            rule                 VARCHAR(20) DEFAULT NULL,
+            created_by           VARCHAR(20) NOT NULL DEFAULT 'system',
+            status               ENUM('scheduled','open','closed') DEFAULT 'scheduled',
+            generation_error     TEXT DEFAULT NULL,
+            generation_attempts  TINYINT UNSIGNED DEFAULT 0,
+            created_at           DATETIME DEFAULT CURRENT_TIMESTAMP,
             INDEX (entity_type, entity_id),
             INDEX (status),
             INDEX (sp_season_id)
@@ -259,12 +264,47 @@ TABLES = [
 ]
 
 
+# ALTER TABLE statements for columns added after initial deployment.
+# Each entry is (table, column, definition). Safe to re-run — skipped if column exists.
+ALTERATIONS = [
+    ("mlbb_registration_periods", "rule",
+     "ALTER TABLE mlbb_registration_periods ADD COLUMN rule VARCHAR(20) DEFAULT NULL AFTER closes_at"),
+    ("mlbb_registration_periods", "play_start",
+     "ALTER TABLE mlbb_registration_periods ADD COLUMN play_start DATE DEFAULT NULL AFTER rule"),
+    ("mlbb_registration_periods", "play_end",
+     "ALTER TABLE mlbb_registration_periods ADD COLUMN play_end DATE DEFAULT NULL AFTER play_start"),
+    ("mlbb_registration_periods", "generation_error",
+     "ALTER TABLE mlbb_registration_periods ADD COLUMN generation_error TEXT DEFAULT NULL AFTER status"),
+    ("mlbb_registration_periods", "generation_attempts",
+     "ALTER TABLE mlbb_registration_periods ADD COLUMN generation_attempts TINYINT UNSIGNED DEFAULT 0 AFTER generation_error"),
+]
+
+
 def run():
     conn = mysql.connector.connect(**DB)
     cur = conn.cursor()
+
     for name, sql in TABLES:
         cur.execute(sql)
         print(f"  OK: {name}")
+
+    # Apply alterations only if the column doesn't already exist
+    db_name = DB["database"]
+    for table, column, alter_sql in ALTERATIONS:
+        cur.execute(
+            """
+            SELECT COUNT(*) FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s AND COLUMN_NAME = %s
+            """,
+            (db_name, table, column),
+        )
+        (exists,) = cur.fetchone()
+        if exists:
+            print(f"  SKIP: {table}.{column} already exists")
+        else:
+            cur.execute(alter_sql)
+            print(f"  ADDED: {table}.{column}")
+
     conn.commit()
     cur.close()
     conn.close()

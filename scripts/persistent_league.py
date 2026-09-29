@@ -200,6 +200,7 @@ def _default_state() -> dict:
         "pending_players": [],
         "event_ids": [],
         "page_id": None,
+        "standings_posted": False,
         "fake_id_offset": 0,
         "created_at": None,
         "state_changed_at": None,
@@ -428,6 +429,12 @@ class PersistentLeague:
                 "--skip-plugins", "--skip-themes", "--allow-root",
                 "post", "update", str(page_id), f"--post_parent={BOT_LEAGUES_PARENT_ID}",
             ], capture_output=True)
+
+        # Update /bot-leagues/ hub listing
+        try:
+            self._update_bot_leagues_hub()
+        except Exception as e:
+            log.warning("bot-leagues hub update failed: %s", e)
 
         # Update state
         self.state.update({
@@ -718,8 +725,12 @@ class PersistentLeague:
                     remaining = (await cur.fetchone())[0]
 
             if remaining == 0:
-                log.info("PLAYING: all %d events have results, posting standings", len(event_ids))
-                await self._post_final_standings()
+                if not self.state.get("standings_posted"):
+                    log.info("PLAYING: all %d events have results, posting standings", len(event_ids))
+                    await self._post_final_standings()
+                    self.state["standings_posted"] = True
+                else:
+                    log.info("PLAYING: all events done, standings already posted")
                 # Stay in PLAYING until Sunday -- the league is done but visible until cleanup
                 return
             else:
@@ -892,13 +903,9 @@ class PersistentLeague:
                 log.warning("league term delete: %s", e)
                 errors += 1
 
-        # Delete WP page
+        # Convert WP page to static standings archive (keep it, don't delete)
         if self.state.get("page_id"):
-            subprocess.run([
-                "wp", "--path=/var/www/sites/play.mlbb.site",
-                "--skip-plugins", "--skip-themes", "--allow-root",
-                "post", "delete", str(self.state["page_id"]), "--force",
-            ], capture_output=True)
+            await self._archive_league_page()
 
         # Clean DB rows
         async with db.get_conn() as conn:
@@ -932,6 +939,12 @@ class PersistentLeague:
         )
         log.info("Cleanup done, %d errors. Next INIT on Monday.", errors)
 
+        # Update /bot-leagues/ hub listing (remove finished league's entry)
+        try:
+            self._update_bot_leagues_hub()
+        except Exception as e:
+            log.warning("bot-leagues hub update failed after cleanup: %s", e)
+
         # Preserve offset/history/cycle, clear the rest
         offset = self.state["fake_id_offset"]
         cycle = self.state.get("cycle", 0)
@@ -941,6 +954,146 @@ class PersistentLeague:
         self.state["cycle"] = cycle
         self.state["history"] = history
         self._transition("INIT")
+
+    def _update_bot_leagues_hub(self):
+        """Rewrite the /bot-leagues/ hub page to list all current child pages."""
+        WP_CLI = ["wp", "--path=/var/www/sites/play.mlbb.site",
+                  "--skip-plugins", "--skip-themes", "--allow-root"]
+
+        # Get all published child pages under BOT_LEAGUES_PARENT_ID
+        result = subprocess.run(
+            WP_CLI + ["post", "list",
+                      f"--post_parent={BOT_LEAGUES_PARENT_ID}",
+                      "--post_type=page", "--post_status=publish",
+                      "--fields=ID,post_title,guid",
+                      "--orderby=date", "--order=DESC",
+                      "--format=json"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            log.warning("WP-CLI post list failed: %s", result.stderr.strip()[:200])
+            return
+
+        import json as _json
+        try:
+            pages = _json.loads(result.stdout)
+        except Exception:
+            log.warning("WP-CLI post list JSON parse failed")
+            return
+
+        if pages:
+            items = "\n".join(
+                f'<li><a href="{p["guid"]}">{p["post_title"]}</a></li>'
+                for p in pages
+            )
+            league_list_html = f'<ul class="wp-block-list">\n{items}\n</ul>'
+        else:
+            league_list_html = "<p><em>No active bot leagues right now. Check back Monday!</em></p>"
+
+        content = (
+            "<!-- wp:heading -->\n"
+            '<h2 class="wp-block-heading">Bot Leagues</h2>\n'
+            "<!-- /wp:heading -->\n\n"
+            "<!-- wp:paragraph -->\n"
+            "<p>Simulated leagues created by the tournament bot. "
+            "Each week a new league runs Mon–Sun with generated players, "
+            "teams, round-robin schedule, and match results.</p>\n"
+            "<!-- /wp:paragraph -->\n\n"
+            "<!-- wp:heading -->\n"
+            '<h2 class="wp-block-heading">League Pages</h2>\n'
+            "<!-- /wp:heading -->\n\n"
+            f"<!-- wp:html -->\n{league_list_html}\n<!-- /wp:html -->"
+        )
+
+        import tempfile, os as _os
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".html", delete=False, dir="/tmp") as f:
+            f.write(content)
+            tmp = f.name
+
+        php = (
+            f"wp_update_post(['ID'=>{BOT_LEAGUES_PARENT_ID},"
+            f"'post_content'=>file_get_contents('{tmp}')]);"
+        )
+        update = subprocess.run(
+            WP_CLI + ["eval", php],
+            capture_output=True, text=True, timeout=30,
+        )
+        _os.unlink(tmp)
+
+        if update.returncode == 0:
+            log.info("Updated /bot-leagues/ hub with %d page(s)", len(pages))
+        else:
+            log.warning("WP-CLI eval failed: %s", update.stderr.strip()[:200])
+
+    async def _archive_league_page(self):
+        """
+        Replace the live league WP page with static standings HTML so it
+        persists as a historical record after the SP artifacts are deleted.
+        """
+        page_id = self.state.get("page_id")
+        if not page_id:
+            return
+
+        league_name = self.state.get("league_name", "Bot League")
+        rule = self.state.get("rule", "?")
+        completed_at = datetime.now(timezone.utc).strftime("%B %d, %Y")
+
+        team_wins: Dict[int, int] = {t["sp_team_id"]: 0 for t in self.state.get("teams", [])}
+        team_names: Dict[int, str] = {t["sp_team_id"]: t["name"] for t in self.state.get("teams", [])}
+
+        event_ids = self.state.get("event_ids", [])
+        if event_ids:
+            ph = ",".join(["%s"] * len(event_ids))
+            async with db.get_conn() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        f"SELECT winning_team_id, COUNT(*) FROM mlbb_match_submissions "
+                        f"WHERE sp_event_id IN ({ph}) AND status='confirmed' "
+                        f"GROUP BY winning_team_id",
+                        tuple(event_ids),
+                    )
+                    for tid, wins in await cur.fetchall():
+                        if tid in team_wins:
+                            team_wins[tid] = wins
+
+        ranked = sorted(team_wins.items(), key=lambda x: x[1], reverse=True)
+        medals = ["1st", "2nd", "3rd"]
+        rows_html = ""
+        for i, (tid, wins) in enumerate(ranked):
+            place = medals[i] if i < 3 else f"{i+1}th"
+            name = team_names.get(tid, f"Team {tid}")
+            rows_html += f"<tr><td>{place}</td><td>{name}</td><td>{wins}</td></tr>\n"
+
+        content = (
+            f"<h2>{league_name} — Final Standings</h2>\n"
+            f"<p><strong>Format:</strong> {RULE_LABELS.get(rule, rule)} &nbsp;|&nbsp; "
+            f"<strong>Completed:</strong> {completed_at}</p>\n"
+            "<table><thead><tr><th>Place</th><th>Team</th><th>Wins</th></tr></thead>\n"
+            f"<tbody>\n{rows_html}</tbody></table>\n"
+            "<p><em>This league has concluded. A new bot league starts every Monday.</em></p>"
+        )
+
+        WP_CLI = ["wp", "--path=/var/www/sites/play.mlbb.site",
+                  "--skip-plugins", "--skip-themes", "--allow-root"]
+        import tempfile as _tmpmod, os as _os2
+        with _tmpmod.NamedTemporaryFile(mode="w", suffix=".html", delete=False, dir="/tmp") as f:
+            f.write(content)
+            tmp = f.name
+
+        new_title = f"{league_name} — Final Standings"
+        php = (
+            f"wp_update_post(['ID'=>{page_id},"
+            f"'post_title'=>'{new_title}',"
+            f"'post_content'=>file_get_contents('{tmp}')]);"
+        )
+        result = subprocess.run(WP_CLI + ["eval", php],
+                                capture_output=True, text=True, timeout=30)
+        _os2.unlink(tmp)
+
+        if result.returncode == 0:
+            log.info("Archived league page %d as static standings for %s", page_id, league_name)
+        else:
+            log.warning("Failed to archive league page: %s", result.stderr.strip()[:200])
 
     async def _post_final_standings(self):
         """Post final standings to Discord and update WP page."""

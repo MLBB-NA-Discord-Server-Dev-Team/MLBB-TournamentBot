@@ -23,6 +23,7 @@ from services.db_helpers import (
     get_approved_teams_for_period,
     get_league_term_for_table,
     get_season_for_period,
+    get_play_end_for_period,
     get_play_end_for_season,
 )
 from services.round_robin import generate_schedule, ScheduleError
@@ -460,7 +461,10 @@ class Scheduler:
             return
 
         play_start = season_info["play_start"]
-        play_end = await get_play_end_for_season(season_info["sp_season_id"])
+        # Per-league play_end overrides season-level end for staggered leagues
+        play_end = await get_play_end_for_period(period_id)
+        if not play_end:
+            play_end = await get_play_end_for_season(season_info["sp_season_id"])
         if not play_end:
             logger.warning("Period %d: cannot determine play_end", period_id)
             return

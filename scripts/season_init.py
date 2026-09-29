@@ -3,10 +3,9 @@ scripts/season_init.py
 Initializes seasons, lore leagues, standings tables, and registration periods
 for the MLBB Tournament system.
 
-Season cadence: every 90 days from March 21, 2026.
-Registration opens 28 days before play start.
-Run this script once to bootstrap all upcoming seasons, then via cron to add new ones.
-Idempotent — safe to re-run.
+Each league runs on its own staggered annual cycle defined by LEAGUE_MONTH_SLOT.
+Registration opens REG_LEAD_DAYS before each league's play start.
+Run via cron to keep the registration buffer fresh. Idempotent — safe to re-run.
 """
 import sys
 import os
@@ -34,59 +33,84 @@ DB = dict(
     database=os.getenv("DB_NAME", "playmlbb_db"),
 )
 
-SEASON_ZERO     = date(2026, 3, 21)   # first play start
-SEASON_INTERVAL = 90                   # days
-REG_LEAD_DAYS   = 30                   # registration opens 30 days before play start
-SEASONS_AHEAD   = 5                    # how many seasons to initialize
+SEASON_ZERO     = date(2026, 3, 21)   # first season play start
+SEASON_INTERVAL = 90                   # days per season
+SEASONS_AHEAD   = 2                    # seasons to pre-create (current + next)
+REG_LEAD_DAYS   = 30                   # days before season play_start that BO5 reg opens
+REG_WINDOW_DAYS = 14                   # registration window length per format group
 
-# All active sp_league taxonomy term IDs.
-# Sourced from league_pages.py output. Add new IDs here when new formats are created.
-ALL_LEAGUE_IDS = [
-    34, 35, 36, 37,     # Draft Pick BO5: Moniyan, Abyss, Northern Vale, Cadia Riverlands
-    25, 26, 27, 28,     # Draft Pick BO3: Agelta, Los Pecados, Aberleen, Dragon Altar
-    40, 41, 42, 43,     # Brawl: Megalith, Vonetis, Oasis, Swan Castle
-    49,                 # Free Play: Eruditio (random team assignment)
+# Format groups in stagger order.
+# week_offset: how many weeks after the base reg-open date this format's window starts.
+# BO5 opens first, BO3 one week later, Brawl one week after that, FreePlay one after Brawl.
+# All leagues within a group open/close on the same dates each season.
+FORMAT_GROUPS = [
+    {"week_offset": 0, "league_ids": [34, 35, 36, 37]},  # Draft Pick BO5
+    {"week_offset": 1, "league_ids": [25, 26, 27, 28]},  # Draft Pick BO3
+    {"week_offset": 2, "league_ids": [40, 41, 42, 43]},  # Brawl
+    {"week_offset": 3, "league_ids": [49]},               # FreePlay
 ]
+
+ALL_LEAGUE_IDS = [lid for grp in FORMAT_GROUPS for lid in grp["league_ids"]]
+
 
 def season_name(start: date) -> str:
     m = start.month
-    if m in (3, 4, 5):   label = "Spring"
-    elif m in (6, 7, 8): label = "Summer"
+    if m in (3, 4, 5):     label = "Spring"
+    elif m in (6, 7, 8):   label = "Summer"
     elif m in (9, 10, 11): label = "Fall"
-    else:                label = "Winter"
+    else:                  label = "Winter"
     return f"{label} {start.year}"
 
 
 def build_season_schedule() -> list[dict]:
     """
-    Generate a rolling buffer of seasons: all past seasons from SEASON_ZERO
-    up to today, plus SEASONS_AHEAD future seasons relative to today.
-    This keeps the buffer fresh regardless of when the script runs.
+    Return the current season plus the next SEASONS_AHEAD-1 upcoming seasons.
+    Each dict: play_start, play_end, name, slug.
     """
     seasons = []
-    today = date.today()
-
-    # Start from SEASON_ZERO, iterate until we're SEASONS_AHEAD past today
+    today   = date.today()
     i = 0
-    while True:
-        start = SEASON_ZERO + timedelta(days=SEASON_INTERVAL * i)
-        # Stop when we're SEASONS_AHEAD past today
-        if start > today + timedelta(days=SEASON_INTERVAL * SEASONS_AHEAD):
-            break
-        reg_opens = start - timedelta(days=REG_LEAD_DAYS)
-        play_end  = start + timedelta(days=SEASON_INTERVAL)
-        seasons.append({
-            "name":       season_name(start),
-            "slug":       season_name(start).lower().replace(" ", "-"),
-            "play_start": start,
-            "play_end":   play_end,
-            "reg_opens":  reg_opens,
-            "reg_closes": start,
-        })
+    while len(seasons) < SEASONS_AHEAD:
+        play_start = SEASON_ZERO + timedelta(days=SEASON_INTERVAL * i)
+        play_end   = play_start + timedelta(days=SEASON_INTERVAL)
+        if play_end >= today:
+            name = season_name(play_start)
+            seasons.append({
+                "play_start": play_start,
+                "play_end":   play_end,
+                "name":       name,
+                "slug":       name.lower().replace(" ", "-"),
+            })
         i += 1
-        if i > 100:  # Safety: don't loop forever
+        if i > 200:
             break
     return seasons
+
+
+def format_windows(season: dict) -> list[dict]:
+    """
+    For a given season, return one window dict per format group with the
+    staggered registration dates.
+
+      base_opens  = season.play_start - REG_LEAD_DAYS
+      group_opens = base_opens + week_offset * 7
+      group_closes= group_opens + REG_WINDOW_DAYS
+      play_start  = group_closes   (leagues start play when reg closes)
+      play_end    = season.play_end (all formats share the season end date)
+    """
+    base = season["play_start"] - timedelta(days=REG_LEAD_DAYS)
+    windows = []
+    for grp in FORMAT_GROUPS:
+        opens_at   = base + timedelta(days=grp["week_offset"] * 7)
+        closes_at  = opens_at + timedelta(days=REG_WINDOW_DAYS)
+        windows.append({
+            "league_ids": grp["league_ids"],
+            "opens_at":   opens_at,
+            "closes_at":  closes_at,
+            "play_start": closes_at,
+            "play_end":   season["play_end"],
+        })
+    return windows
 
 
 # ── SportsPress REST helpers ──────────────────────────────────────────────────
@@ -129,8 +153,6 @@ def update_term_description(endpoint: str, term_id: int, description: str):
         f"{WP_URL}/wp-json/sportspress/v2/{endpoint}/{term_id}",
         auth=AUTH, headers=HEADERS, json={"description": description}
     )
-
-
 
 
 def _apply_standings_meta_sync(cur, sp_table_id: int) -> None:
@@ -177,13 +199,22 @@ def _apply_standings_meta_sync(cur, sp_table_id: int) -> None:
             (sp_table_id, meta_key, meta_value),
         )
 
+
 def get_or_create_table(title: str, league_id: int, season_id: int) -> int:
     """Return existing sp_table ID or create and return new one."""
-    existing = sp_get("tables")
-    for t in existing:
-        if t["title"]["rendered"] == title:
-            print(f"  EXISTS [table]: {title} (id={t['id']})")
-            return t["id"]
+    # Query DB directly — REST API only returns newest 100, misses older tables
+    _conn = mysql.connector.connect(**DB)
+    _cur  = _conn.cursor()
+    _cur.execute(
+        "SELECT ID FROM wp_posts WHERE post_type='sp_table' AND post_status='publish' AND post_title=%s LIMIT 1",
+        (title,),
+    )
+    _row = _cur.fetchone()
+    _cur.close()
+    _conn.close()
+    if _row:
+        print(f"  EXISTS [table]: {title} (id={_row[0]})")
+        return _row[0]
     created = sp_post("tables", {
         "title":   title,
         "status":  "publish",
@@ -211,16 +242,21 @@ def get_or_create_table(title: str, league_id: int, season_id: int) -> int:
 # ── DB helpers ────────────────────────────────────────────────────────────────
 
 def upsert_season_schedule(cur, sp_season_id: int, season: dict):
+    """
+    Write or update a season schedule row. When a season contains staggered
+    leagues, the season-level play_start/play_end is the earliest/latest window
+    across all leagues in that season — used only for display, not scheduling.
+    """
     cur.execute("""
         INSERT INTO mlbb_season_schedule
             (sp_season_id, season_name, play_start, play_end, reg_opens, reg_closes)
         VALUES (%s, %s, %s, %s, %s, %s)
         ON DUPLICATE KEY UPDATE
             season_name=VALUES(season_name),
-            play_start=VALUES(play_start),
-            play_end=VALUES(play_end),
-            reg_opens=VALUES(reg_opens),
-            reg_closes=VALUES(reg_closes)
+            play_start=LEAST(play_start, VALUES(play_start)),
+            play_end=GREATEST(play_end, VALUES(play_end)),
+            reg_opens=LEAST(reg_opens, VALUES(reg_opens)),
+            reg_closes=GREATEST(reg_closes, VALUES(reg_closes))
     """, (sp_season_id, season["name"], season["play_start"],
           season["play_end"], season["reg_opens"], season["reg_closes"]))
 
@@ -240,88 +276,150 @@ def get_league_rule(cur, table_id: int) -> str | None:
     return row[0] if row else None
 
 
-def upsert_registration_period(cur, entity_id: int, sp_season_id: int, season: dict, rule: str = None):
-    """Create registration period if one doesn't already exist for this table."""
+def upsert_registration_period(
+    cur,
+    entity_id: int,
+    sp_season_id: int,
+    rule: str,
+    opens_at: date,
+    closes_at: date,
+    play_start: date,
+    play_end: date,
+) -> None:
+    """
+    Create or update a registration period for a league table.
+
+    For new periods: inserts with status derived from current date.
+    For existing 'scheduled' periods: updates the dates if they differ from
+    the staggered schedule (allows re-running this script to correct old periods).
+    Closed/open periods are left untouched.
+    """
+    today = date.today()
+
     cur.execute("""
-        SELECT id, status FROM mlbb_registration_periods
+        SELECT id, status, opens_at, play_start
+        FROM mlbb_registration_periods
         WHERE entity_type='league' AND entity_id=%s
+        ORDER BY id DESC LIMIT 1
     """, (entity_id,))
     row = cur.fetchone()
+
     if row:
-        print(f"  EXISTS [reg_period]: table {entity_id} (id={row[0]}, status={row[1]})")
+        period_id, status, existing_opens, existing_play_start = row
+        # Update stale scheduled periods so dates reflect the stagger
+        if status == 'scheduled' and (existing_opens != opens_at or existing_play_start != play_start):
+            cur.execute("""
+                UPDATE mlbb_registration_periods
+                SET opens_at=%s, closes_at=%s, play_start=%s, play_end=%s, sp_season_id=%s
+                WHERE id=%s
+            """, (
+                datetime.combine(opens_at, datetime.min.time()),
+                datetime.combine(closes_at, datetime.min.time()),
+                play_start, play_end, sp_season_id, period_id,
+            ))
+            print(f"  UPDATED [reg_period]: table {entity_id} (id={period_id}) "
+                  f"play_start={play_start} opens={opens_at}")
+        else:
+            print(f"  EXISTS  [reg_period]: table {entity_id} (id={period_id}, status={status})")
         return
 
-    today = date.today()
-    opens_at  = season["reg_opens"]
-    closes_at = season["reg_closes"]
-
+    # Determine initial status from current date
     if today >= closes_at:
         status = "closed"
     elif today >= opens_at:
         status = "open"
-        opens_at = today
+        opens_at = today   # opened mid-window; start from today
     else:
         status = "scheduled"
 
-    if rule is None:
-        rule = get_league_rule(cur, entity_id)
-
     cur.execute("""
         INSERT INTO mlbb_registration_periods
-            (entity_type, entity_id, sp_season_id, opens_at, closes_at, rule, status, created_by)
-        VALUES ('league', %s, %s, %s, %s, %s, %s, 'system')
-    """, (entity_id, sp_season_id,
-          datetime.combine(opens_at, datetime.min.time()),
-          datetime.combine(closes_at, datetime.min.time()),
-          rule, status))
+            (entity_type, entity_id, sp_season_id, opens_at, closes_at,
+             play_start, play_end, rule, status, created_by)
+        VALUES ('league', %s, %s, %s, %s, %s, %s, %s, %s, 'system')
+    """, (
+        entity_id, sp_season_id,
+        datetime.combine(opens_at, datetime.min.time()),
+        datetime.combine(closes_at, datetime.min.time()),
+        play_start, play_end,
+        rule, status,
+    ))
     print(f"  CREATED [reg_period]: table {entity_id} rule={rule} status={status} "
-          f"opens={opens_at} closes={closes_at}")
+          f"play_start={play_start} opens={opens_at} closes={closes_at}")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
+    print("\n=== Fetching league terms ===")
+    all_terms  = sp_get("leagues")
+    league_map = {t["id"]: t["name"] for t in all_terms}
+    active_ids = set(lid for lid in ALL_LEAGUE_IDS if lid in league_map)
+    print(f"  {len(active_ids)} active league formats found")
+
     seasons = build_season_schedule()
 
-    print("\n=== Season Schedule ===")
-    for s in seasons:
-        print(f"  {s['name']:20s}  play={s['play_start']}  "
-              f"reg={s['reg_opens']} → {s['reg_closes']}")
-
-    # Fetch all sp_league terms to build id→name map
-    print("\n=== Fetching league terms ===")
-    all_terms = sp_get("leagues")
-    league_map = {t["id"]: t["name"] for t in all_terms}
-    active_ids = [lid for lid in ALL_LEAGUE_IDS if lid in league_map]
-    print(f"  {len(active_ids)} active league formats found")
+    print("\n=== Staggered Schedule (this run) ===")
+    for season in seasons:
+        print(f"\n  {season['name']}  (play {season['play_start']} → {season['play_end']})")
+        for win in format_windows(season):
+            label = league_map.get(win["league_ids"][0], "?").replace(" League", "")
+            league_names = ", ".join(
+                league_map.get(lid, str(lid)).replace(" League", "")
+                for lid in win["league_ids"] if lid in active_ids
+            )
+            print(f"    reg {win['opens_at']} → {win['closes_at']}  "
+                  f"play {win['play_start']} → {win['play_end']}  [{league_names}]")
 
     conn = mysql.connector.connect(**DB)
     cur  = conn.cursor()
 
+    season_id_cache: dict[str, int] = {}
+
     for season in seasons:
-        print(f"\n=== Season: {season['name']} ===")
-        desc = (
-            f"Play Start: {fmt_date(season['play_start'])}  |  "
-            f"Registration: {fmt_date(season['reg_opens'])} – {fmt_date(season['reg_closes'])}\n\n"
-            f'[mlbb_season_leagues season="{season["slug"]}"]'
-        )
-        sp_season_id = get_or_create_term("seasons", season["name"], season["slug"], description=desc)
-        upsert_season_schedule(cur, sp_season_id, season)
+        s_name = season["name"]
+        s_slug = season["slug"]
 
-        for league_id in active_ids:
-            league_name = league_map[league_id]
-            table_title = f"{league_name} — {season['name']}"
-            table_id = get_or_create_table(table_title, league_id, sp_season_id)
+        if s_name not in season_id_cache:
+            sp_season_id = get_or_create_term("seasons", s_name, s_slug)
+            season_id_cache[s_name] = sp_season_id
+        sp_season_id = season_id_cache[s_name]
 
-            # Look up rule from termmeta on the sp_league term directly
-            cur.execute(
-                "SELECT meta_value FROM wp_termmeta WHERE term_id=%s AND meta_key='mlbb_rule'",
-                (league_id,),
-            )
-            rule_row = cur.fetchone()
-            rule = rule_row[0] if rule_row else None
+        print(f"\n=== Season: {s_name} (sp_season_id={sp_season_id}) ===")
 
-            upsert_registration_period(cur, table_id, sp_season_id, season, rule=rule)
+        for win in format_windows(season):
+            opens_at   = win["opens_at"]
+            closes_at  = win["closes_at"]
+            play_start = win["play_start"]
+            play_end   = win["play_end"]
+
+            # Season schedule row spans the full range across all format windows
+            upsert_season_schedule(cur, sp_season_id, {
+                "name":       s_name,
+                "play_start": play_start,
+                "play_end":   play_end,
+                "reg_opens":  opens_at,
+                "reg_closes": closes_at,
+            })
+
+            for league_id in win["league_ids"]:
+                if league_id not in active_ids:
+                    continue
+                league_name = league_map[league_id]
+                table_title = f"{league_name} — {s_name}"
+                table_id    = get_or_create_table(table_title, league_id, sp_season_id)
+
+                cur.execute(
+                    "SELECT meta_value FROM wp_termmeta WHERE term_id=%s AND meta_key='mlbb_rule'",
+                    (league_id,),
+                )
+                rule_row = cur.fetchone()
+                rule = rule_row[0] if rule_row else None
+
+                upsert_registration_period(
+                    cur, table_id, sp_season_id, rule,
+                    opens_at, closes_at, play_start, play_end,
+                )
 
     conn.commit()
     cur.close()

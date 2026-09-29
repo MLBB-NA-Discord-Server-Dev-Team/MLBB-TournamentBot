@@ -627,12 +627,18 @@ async def get_league_term_for_table(table_post_id: int) -> Optional[int]:
 
 
 async def get_season_for_period(period_id: int) -> Optional[dict]:
-    """Return season info for a registration period (via sp_season_id or season_schedule)."""
+    """
+    Return season info for a registration period.
+
+    play_start is taken from the period's own play_start column when set
+    (staggered leagues), falling back to the season-level play_start.
+    """
     async with db.get_conn() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 """
-                SELECT rp.sp_season_id, ss.season_name, ss.play_start
+                SELECT rp.sp_season_id, ss.season_name,
+                       COALESCE(rp.play_start, ss.play_start) AS play_start
                 FROM mlbb_registration_periods rp
                 LEFT JOIN mlbb_season_schedule ss ON ss.sp_season_id = rp.sp_season_id
                 WHERE rp.id = %s
@@ -643,6 +649,28 @@ async def get_season_for_period(period_id: int) -> Optional[dict]:
     if not row or not row[0]:
         return None
     return {"sp_season_id": row[0], "season_name": row[1], "play_start": row[2]}
+
+
+async def get_play_end_for_period(period_id: int) -> Optional:
+    """
+    Return play_end for a registration period.
+
+    Uses the period's own play_end column when set (staggered leagues),
+    falling back to the season-level play_end from mlbb_season_schedule.
+    """
+    async with db.get_conn() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                SELECT COALESCE(rp.play_end, ss.play_end)
+                FROM mlbb_registration_periods rp
+                LEFT JOIN mlbb_season_schedule ss ON ss.sp_season_id = rp.sp_season_id
+                WHERE rp.id = %s
+                """,
+                (period_id,),
+            )
+            row = await cur.fetchone()
+            return row[0] if row else None
 
 
 async def get_play_end_for_season(sp_season_id: int) -> Optional:
